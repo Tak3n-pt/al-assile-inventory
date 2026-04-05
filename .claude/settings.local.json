@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(ping:*)",
+      "Bash(npm run:*)",
+      "Bash(wmic process where \"name=''node.exe''\" get processid,commandline)",
+      "Bash(npm rebuild:*)",
+      "Bash(wmic logicaldisk:*)",
+      "Bash(gh release create:*)",
+      "Bash(docker --version:*)",
+      "Bash(docker-compose:*)",
+      "Bash(git clone:*)"
+    ]
+  }
+}
