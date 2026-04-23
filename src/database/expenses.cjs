@@ -77,7 +77,8 @@ const expensesQueries = (db) => ({
 
   getExpensesByMonth: (year, month) => {
     const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-    const endDate = `${year}-${String(month).padStart(2, '0')}-31`;
+    const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+    const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
     return db.prepare(`
       SELECT
         e.*,
@@ -149,9 +150,11 @@ const expensesQueries = (db) => ({
   getExpenseStats: () => {
     const now = new Date();
     const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const mNum = now.getMonth() + 1;
+    const month = String(mNum).padStart(2, '0');
     const startOfMonth = `${year}-${month}-01`;
-    const endOfMonth = `${year}-${month}-31`;
+    const lastDay = new Date(year, mNum, 0).getDate();
+    const endOfMonth = `${year}-${month}-${String(lastDay).padStart(2, '0')}`;
 
     const stats = db.prepare(`
       SELECT
@@ -201,7 +204,8 @@ const expensesQueries = (db) => ({
     const params = [];
     if (year && month) {
       const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-      const endDate = `${year}-${String(month).padStart(2, '0')}-31`;
+      const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+      const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
       query += ` WHERE e.date BETWEEN ? AND ?`;
       params.push(startDate, endDate);
     } else if (year) {

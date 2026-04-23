@@ -150,7 +150,7 @@ const Settings = () => {
 
   const handleSyncPush = async () => {
     if (!cloudServerUrl) {
-      setSyncMessage({ type: 'error', text: language === 'ar' ? 'يرجى إدخال رابط الخادم' : 'Please enter the server URL' });
+      setSyncMessage({ type: 'error', text: t('pleaseEnterServerUrl') });
       return;
     }
     try {
@@ -164,9 +164,9 @@ const Settings = () => {
       if (result.success) {
         const now = new Date().toISOString();
         setLastSyncPush(now);
-        setSyncMessage({ type: 'success', text: language === 'ar' ? 'تم رفع البيانات بنجاح' : 'Data pushed successfully' });
+        setSyncMessage({ type: 'success', text: t('dataPushedSuccess') });
       } else {
-        setSyncMessage({ type: 'error', text: result.error || (language === 'ar' ? 'فشل الرفع' : 'Push failed') });
+        setSyncMessage({ type: 'error', text: result.error || t('pushFailed') });
       }
     } catch (err) {
       setSyncMessage({ type: 'error', text: err.message });
@@ -177,7 +177,7 @@ const Settings = () => {
 
   const handleSyncPull = async () => {
     if (!cloudServerUrl) {
-      setSyncMessage({ type: 'error', text: language === 'ar' ? 'يرجى إدخال رابط الخادم' : 'Please enter the server URL' });
+      setSyncMessage({ type: 'error', text: t('pleaseEnterServerUrl') });
       return;
     }
     try {
@@ -193,12 +193,10 @@ const Settings = () => {
         setLastSyncPull(now);
         setSyncMessage({
           type: 'success',
-          text: language === 'ar'
-            ? `تم استيراد ${result.imported} مبيعات من الهاتف`
-            : `Pulled ${result.imported} sale(s) from mobile`
+          text: t('pulledSalesFromMobile').replace('{n}', result.imported)
         });
       } else {
-        setSyncMessage({ type: 'error', text: result.error || (language === 'ar' ? 'فشل السحب' : 'Pull failed') });
+        setSyncMessage({ type: 'error', text: result.error || t('pullFailed') });
       }
     } catch (err) {
       setSyncMessage({ type: 'error', text: err.message });
@@ -219,7 +217,7 @@ const Settings = () => {
   const handleSaveQuantity = async () => {
     const quantity = parseFloat(newQuantity);
     if (isNaN(quantity) || quantity < 0) {
-      setError(language === 'ar' ? 'يرجى إدخال كمية صالحة' : 'Please enter a valid quantity');
+      setError(t('pleaseEnterValidQuantity'));
       return;
     }
 
@@ -232,13 +230,13 @@ const Settings = () => {
         result = await window.api.stockQuantity.adjust(
           editingItem.id,
           quantity,
-          language === 'ar' ? 'تعديل الرصيد الافتتاحي' : 'Opening balance adjustment'
+          t('openingBalanceAdjustment')
         );
       } else {
         result = await window.api.products.adjustQuantity(
           editingItem.id,
           quantity,
-          language === 'ar' ? 'الرصيد الافتتاحي - المخزون الأولي' : 'Opening balance - Initial inventory'
+          t('openingBalanceInitialInventory')
         );
       }
 
@@ -247,10 +245,10 @@ const Settings = () => {
         setEditingItem(null);
         loadInventory();
       } else {
-        setError(result.error || (language === 'ar' ? 'فشل حفظ الكمية' : 'Failed to save quantity'));
+        setError(result.error || t('failedToSaveQuantity'));
       }
     } catch (err) {
-      setError(err.message || (language === 'ar' ? 'حدث خطأ' : 'An error occurred'));
+      setError(err.message || t('errorOccurred'));
     } finally {
       setSavingQuantity(false);
     }
@@ -294,12 +292,12 @@ const Settings = () => {
 
   const handleSaveUser = async () => {
     if (!userForm.username || !userForm.name || !userForm.role) {
-      setError(language === 'ar' ? 'يرجى ملء جميع الحقول المطلوبة' : 'Please fill all required fields');
+      setError(t('fillRequiredFields'));
       return;
     }
 
     if (!editingUser && !userForm.password) {
-      setError(language === 'ar' ? 'كلمة المرور مطلوبة للمستخدم الجديد' : 'Password is required for new user');
+      setError(t('passwordRequiredNewUser'));
       return;
     }
 
@@ -317,7 +315,7 @@ const Settings = () => {
         });
 
         if (!updateResult.success) {
-          setError(updateResult.error || (language === 'ar' ? 'فشل تحديث المستخدم' : 'Failed to update user'));
+          setError(updateResult.error || t('failedToUpdateUser'));
           setSaving(false);
           return;
         }
@@ -330,7 +328,7 @@ const Settings = () => {
         // Add new user
         const addResult = await window.api.users.add(userForm);
         if (!addResult.success) {
-          setError(addResult.error || (language === 'ar' ? 'فشل إضافة المستخدم' : 'Failed to add user'));
+          setError(addResult.error || t('failedToAddUser'));
           setSaving(false);
           return;
         }
@@ -339,7 +337,7 @@ const Settings = () => {
       setShowUserModal(false);
       loadUsers();
     } catch (err) {
-      setError(err.message || (language === 'ar' ? 'حدث خطأ' : 'An error occurred'));
+      setError(err.message || t('errorOccurred'));
     } finally {
       setSaving(false);
     }
@@ -353,7 +351,7 @@ const Settings = () => {
       setError('');
       const result = await window.api.users.delete(userToDelete.id);
       if (!result.success) {
-        setError(result.error || (language === 'ar' ? 'فشل حذف المستخدم' : 'Failed to delete user'));
+        setError(result.error || t('failedToDeleteUser'));
         setSaving(false);
         return;
       }
@@ -361,7 +359,7 @@ const Settings = () => {
       setUserToDelete(null);
       loadUsers();
     } catch (err) {
-      setError(err.message || (language === 'ar' ? 'حدث خطأ' : 'An error occurred'));
+      setError(err.message || t('errorOccurred'));
     } finally {
       setSaving(false);
     }
@@ -370,7 +368,7 @@ const Settings = () => {
   // Reset system
   const handleReset = async () => {
     if (!resetPassword) {
-      setError(language === 'ar' ? 'يرجى إدخال كلمة المرور' : 'Please enter your password');
+      setError(t('pleaseEnterPassword'));
       return;
     }
 
@@ -388,10 +386,10 @@ const Settings = () => {
         logout();
         window.location.hash = '#/login';
       } else {
-        setError(result.error || (language === 'ar' ? 'فشل إعادة تعيين النظام' : 'System reset failed'));
+        setError(result.error || t('systemResetFailed'));
       }
     } catch (err) {
-      setError(err.message || (language === 'ar' ? 'حدث خطأ' : 'An error occurred'));
+      setError(err.message || t('errorOccurred'));
     } finally {
       setResetting(false);
     }
@@ -417,9 +415,9 @@ const Settings = () => {
 
   const getRoleLabel = (role) => {
     const labels = {
-      admin: language === 'ar' ? 'مدير النظام' : 'Administrator',
-      manager: language === 'ar' ? 'مدير' : 'Manager',
-      sales: language === 'ar' ? 'موظف مبيعات' : 'Sales'
+      admin: t('roleAdmin'),
+      manager: t('roleManager'),
+      sales: t('roleSales')
     };
     return labels[role] || role;
   };
@@ -434,10 +432,10 @@ const Settings = () => {
           </div>
           <div>
             <h1 className="text-2xl font-bold text-white">
-              {language === 'ar' ? 'الإعدادات' : 'Settings'}
+              {t('settings')}
             </h1>
             <p className="text-dark-400">
-              {language === 'ar' ? 'إدارة النظام والمستخدمين' : 'System and user management'}
+              {t('systemUserManagement')}
             </p>
           </div>
         </div>
@@ -451,14 +449,14 @@ const Settings = () => {
       >
         <h2 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
           <Sun size={20} className="text-amber-400" />
-          {language === 'ar' ? 'المظهر واللغة' : 'Appearance & Language'}
+          {t('appearanceAndLanguage')}
         </h2>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
           {/* Theme */}
           <div>
             <label className="block text-sm font-medium text-dark-300 mb-3">
-              {language === 'ar' ? 'المظهر' : 'Theme'}
+              {t('themeLabel')}
             </label>
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -469,7 +467,7 @@ const Settings = () => {
                     : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'}`}
               >
                 <Moon size={20} />
-                <span className="font-medium">{language === 'ar' ? 'داكن' : 'Dark'}</span>
+                <span className="font-medium">{t('themeDark')}</span>
               </button>
               <button
                 onClick={() => theme !== 'light' && toggleTheme()}
@@ -479,7 +477,7 @@ const Settings = () => {
                     : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'}`}
               >
                 <Sun size={20} />
-                <span className="font-medium">{language === 'ar' ? 'فاتح' : 'Light'}</span>
+                <span className="font-medium">{t('themeLight')}</span>
               </button>
             </div>
           </div>
@@ -487,7 +485,7 @@ const Settings = () => {
           {/* Language */}
           <div>
             <label className="block text-sm font-medium text-dark-300 mb-3">
-              {language === 'ar' ? 'اللغة' : 'Language'}
+              {t('language')}
             </label>
             <div className="grid grid-cols-2 gap-3">
               <button
@@ -528,7 +526,7 @@ const Settings = () => {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
                 <Users size={20} className="text-blue-400" />
-                {language === 'ar' ? 'إدارة المستخدمين' : 'User Management'}
+                {t('userManagement')}
               </h2>
               <motion.button
                 whileHover={{ scale: 1.05 }}
@@ -537,7 +535,7 @@ const Settings = () => {
                 className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 text-white rounded-xl font-medium hover:shadow-lg hover:shadow-emerald-500/25 transition-all"
               >
                 <UserPlus size={18} />
-                {language === 'ar' ? 'إضافة مستخدم' : 'Add User'}
+                {t('addUser')}
               </motion.button>
             </div>
 
@@ -578,7 +576,7 @@ const Settings = () => {
                         whileTap={{ scale: 0.9 }}
                         onClick={() => handleEditUser(userData)}
                         className="p-2 rounded-lg text-dark-400 hover:text-blue-400 hover:bg-blue-500/10 transition-all"
-                        title={language === 'ar' ? 'تعديل' : 'Edit'}
+                        title={t('edit')}
                       >
                         <Edit2 size={18} />
                       </motion.button>
@@ -591,7 +589,7 @@ const Settings = () => {
                             setShowDeleteModal(true);
                           }}
                           className="p-2 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-all"
-                          title={language === 'ar' ? 'حذف' : 'Delete'}
+                          title={t('delete')}
                         >
                           <Trash2 size={18} />
                         </motion.button>
@@ -602,7 +600,7 @@ const Settings = () => {
 
                 {users.length === 0 && (
                   <div className="text-center py-8 text-dark-400">
-                    {language === 'ar' ? 'لا يوجد مستخدمين' : 'No users found'}
+                    {t('noUsersFound')}
                   </div>
                 )}
               </div>
@@ -619,14 +617,12 @@ const Settings = () => {
             <div className="flex items-center justify-between mb-4">
               <h2 className="text-lg font-semibold text-white flex items-center gap-2">
                 <Warehouse size={20} className="text-emerald-400" />
-                {language === 'ar' ? 'الرصيد الافتتاحي' : 'Initial Inventory'}
+                {t('initialInventory')}
               </h2>
             </div>
 
             <p className="text-dark-400 text-sm mb-4">
-              {language === 'ar'
-                ? 'أدخل الكميات الموجودة لديك قبل استخدام البرنامج (المواد الخام والمنتجات الجاهزة)'
-                : 'Enter your existing quantities before using the software (raw materials and finished products)'}
+              {t('initialInventoryDesc')}
             </p>
 
             {/* Tabs */}
@@ -639,7 +635,7 @@ const Settings = () => {
                     : 'bg-dark-800/50 text-dark-400 hover:text-white hover:bg-dark-700'}`}
               >
                 <Package size={18} />
-                {language === 'ar' ? 'المواد الخام' : 'Raw Materials'}
+                {t('rawMaterials')}
                 <span className="text-xs bg-black/20 px-2 py-0.5 rounded-full">
                   {stockItems.length}
                 </span>
@@ -652,7 +648,7 @@ const Settings = () => {
                     : 'bg-dark-800/50 text-dark-400 hover:text-white hover:bg-dark-700'}`}
               >
                 <Warehouse size={18} />
-                {language === 'ar' ? 'المنتجات' : 'Products'}
+                {t('products')}
                 <span className="text-xs bg-black/20 px-2 py-0.5 rounded-full">
                   {products.length}
                 </span>
@@ -666,7 +662,7 @@ const Settings = () => {
                 type="text"
                 value={inventorySearch}
                 onChange={(e) => setInventorySearch(e.target.value)}
-                placeholder={language === 'ar' ? 'بحث...' : 'Search...'}
+                placeholder={t('searchEllipsis')}
                 className="w-full pl-12 pr-4 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
               />
             </div>
@@ -705,7 +701,7 @@ const Settings = () => {
                             whileTap={{ scale: 0.9 }}
                             onClick={() => handleEditQuantity(item, 'stock')}
                             className="p-2 rounded-lg text-dark-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-all"
-                            title={language === 'ar' ? 'تعديل الكمية' : 'Edit Quantity'}
+                            title={t('editQuantity')}
                           >
                             <Edit2 size={18} />
                           </motion.button>
@@ -714,7 +710,7 @@ const Settings = () => {
                     ))
                   ) : (
                     <div className="text-center py-8 text-dark-400">
-                      {language === 'ar' ? 'لا توجد مواد خام. أضف مواد من صفحة المخزون.' : 'No raw materials. Add items from the Stock page.'}
+                      {t('noRawMaterialsHint')}
                     </div>
                   )
                 ) : (
@@ -746,7 +742,7 @@ const Settings = () => {
                             whileTap={{ scale: 0.9 }}
                             onClick={() => handleEditQuantity(item, 'product')}
                             className="p-2 rounded-lg text-dark-400 hover:text-violet-400 hover:bg-violet-500/10 transition-all"
-                            title={language === 'ar' ? 'تعديل الكمية' : 'Edit Quantity'}
+                            title={t('editQuantity')}
                           >
                             <Edit2 size={18} />
                           </motion.button>
@@ -755,7 +751,7 @@ const Settings = () => {
                     ))
                   ) : (
                     <div className="text-center py-8 text-dark-400">
-                      {language === 'ar' ? 'لا توجد منتجات. أضف منتجات من صفحة المخزون.' : 'No products. Add products from the Inventory page.'}
+                      {t('noProductsHint')}
                     </div>
                   )
                 )}
@@ -772,19 +768,17 @@ const Settings = () => {
           >
             <h2 className="text-lg font-semibold text-white mb-1 flex items-center gap-2">
               <Cloud size={20} className="text-sky-400" />
-              {language === 'ar' ? 'المزامنة السحابية' : 'Cloud Sync'}
+              {t('cloudSync')}
             </h2>
             <p className="text-dark-400 text-sm mb-5">
-              {language === 'ar'
-                ? 'ربط التطبيق بالخادم السحابي لمزامنة البيانات مع التطبيق المحمول.'
-                : 'Connect to your cloud server to sync data with the mobile app.'}
+              {t('cloudSyncDesc')}
             </p>
 
             <div className="space-y-4">
               {/* Server URL */}
               <div>
                 <label className="block text-sm font-medium text-dark-300 mb-1.5">
-                  {language === 'ar' ? 'رابط الخادم السحابي' : 'Cloud Server URL'}
+                  {t('cloudServerUrl')}
                 </label>
                 <input
                   type="text"
@@ -798,13 +792,13 @@ const Settings = () => {
               {/* Sync Key */}
               <div>
                 <label className="block text-sm font-medium text-dark-300 mb-1.5">
-                  {language === 'ar' ? 'مفتاح المزامنة' : 'Sync API Key'}
+                  {t('syncApiKey')}
                 </label>
                 <input
                   type="text"
                   value={cloudSyncKey}
                   onChange={(e) => setCloudSyncKey(e.target.value)}
-                  placeholder={language === 'ar' ? 'أدخل مفتاح المزامنة' : 'Enter sync key'}
+                  placeholder={t('enterSyncKey')}
                   className="w-full px-4 py-3 rounded-xl bg-dark-900/60 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-sky-500 transition-colors"
                 />
               </div>
@@ -834,7 +828,7 @@ const Settings = () => {
                   ) : (
                     <Upload size={18} />
                   )}
-                  {language === 'ar' ? 'رفع إلى السحابة' : 'Push to Cloud'}
+                  {t('pushToCloud')}
                 </motion.button>
 
                 <motion.button
@@ -849,7 +843,7 @@ const Settings = () => {
                   ) : (
                     <Download size={18} />
                   )}
-                  {language === 'ar' ? 'سحب من السحابة' : 'Pull from Cloud'}
+                  {t('pullFromCloud')}
                 </motion.button>
               </div>
 
@@ -860,7 +854,7 @@ const Settings = () => {
                     <div className="flex items-center justify-between text-xs text-dark-400">
                       <span className="flex items-center gap-1.5">
                         <Upload size={12} className="text-sky-400" />
-                        {language === 'ar' ? 'آخر رفع:' : 'Last push:'}
+                        {t('lastPush')}
                       </span>
                       <span>{new Date(lastSyncPush).toLocaleString()}</span>
                     </div>
@@ -869,7 +863,7 @@ const Settings = () => {
                     <div className="flex items-center justify-between text-xs text-dark-400">
                       <span className="flex items-center gap-1.5">
                         <Download size={12} className="text-violet-400" />
-                        {language === 'ar' ? 'آخر سحب:' : 'Last pull:'}
+                        {t('lastPull')}
                       </span>
                       <span>{new Date(lastSyncPull).toLocaleString()}</span>
                     </div>
@@ -888,12 +882,10 @@ const Settings = () => {
           >
             <h2 className="text-lg font-semibold text-white mb-2 flex items-center gap-2">
               <AlertTriangle size={20} className="text-red-400" />
-              {language === 'ar' ? 'إعادة تعيين النظام' : 'System Reset'}
+              {t('systemReset')}
             </h2>
             <p className="text-dark-400 mb-4">
-              {language === 'ar'
-                ? 'هذا الإجراء سيحذف جميع البيانات بما في ذلك المنتجات، المبيعات، العملاء، والمصروفات. لا يمكن التراجع عن هذا الإجراء.'
-                : 'This action will delete all data including products, sales, clients, and expenses. This action cannot be undone.'}
+              {t('systemResetDesc')}
             </p>
             <motion.button
               whileHover={{ scale: 1.02 }}
@@ -906,7 +898,7 @@ const Settings = () => {
               className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-xl font-medium hover:shadow-lg hover:shadow-red-500/25 transition-all"
             >
               <RefreshCw size={18} />
-              {language === 'ar' ? 'إعادة تعيين النظام' : 'Reset System'}
+              {t('resetSystem')}
             </motion.button>
           </motion.div>
         </>
@@ -933,9 +925,7 @@ const Settings = () => {
             >
               <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
                 <h2 className="text-lg font-semibold text-white">
-                  {editingUser
-                    ? (language === 'ar' ? 'تعديل المستخدم' : 'Edit User')
-                    : (language === 'ar' ? 'إضافة مستخدم جديد' : 'Add New User')}
+                  {editingUser ? t('editUser') : t('addNewUser')}
                 </h2>
                 <button
                   onClick={() => setShowUserModal(false)}
@@ -955,39 +945,39 @@ const Settings = () => {
                 {/* Name */}
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {language === 'ar' ? 'الاسم' : 'Name'} *
+                    {t('name')} *
                   </label>
                   <input
                     type="text"
                     value={userForm.name}
                     onChange={(e) => setUserForm({ ...userForm, name: e.target.value })}
                     className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                    placeholder={language === 'ar' ? 'أدخل الاسم' : 'Enter name'}
+                    placeholder={t('enterName')}
                   />
                 </div>
 
                 {/* Username */}
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {language === 'ar' ? 'اسم المستخدم' : 'Username'} *
+                    {t('username')} *
                   </label>
                   <input
                     type="text"
                     value={userForm.username}
                     onChange={(e) => setUserForm({ ...userForm, username: e.target.value })}
                     className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                    placeholder={language === 'ar' ? 'أدخل اسم المستخدم' : 'Enter username'}
+                    placeholder={t('enterUsername')}
                   />
                 </div>
 
                 {/* Password */}
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {language === 'ar' ? 'كلمة المرور' : 'Password'}
+                    {t('password')}
                     {!editingUser && ' *'}
                     {editingUser && (
                       <span className="text-dark-500 text-xs mr-2">
-                        ({language === 'ar' ? 'اتركه فارغاً للإبقاء على القديم' : 'Leave empty to keep current'})
+                        ({t('leaveEmptyToKeep')})
                       </span>
                     )}
                   </label>
@@ -997,7 +987,7 @@ const Settings = () => {
                       value={userForm.password}
                       onChange={(e) => setUserForm({ ...userForm, password: e.target.value })}
                       className="w-full px-4 py-3 pr-12 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                      placeholder={language === 'ar' ? 'أدخل كلمة المرور' : 'Enter password'}
+                      placeholder={t('enterPassword')}
                     />
                     <button
                       type="button"
@@ -1012,7 +1002,7 @@ const Settings = () => {
                 {/* Role */}
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {language === 'ar' ? 'الصلاحية' : 'Role'} *
+                    {t('role')} *
                   </label>
                   <div className="grid grid-cols-3 gap-2">
                     {['admin', 'manager', 'sales'].map((role) => (
@@ -1040,7 +1030,7 @@ const Settings = () => {
                     onClick={() => setShowUserModal(false)}
                     className="flex-1 px-4 py-3 rounded-xl bg-dark-800 text-white font-medium hover:bg-dark-700 transition-colors"
                   >
-                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
+                    {t('cancel')}
                   </button>
                   <button
                     onClick={handleSaveUser}
@@ -1052,7 +1042,7 @@ const Settings = () => {
                     ) : (
                       <>
                         <Save size={18} />
-                        {language === 'ar' ? 'حفظ' : 'Save'}
+                        {t('save')}
                       </>
                     )}
                   </button>
@@ -1087,19 +1077,17 @@ const Settings = () => {
                   <Trash2 size={32} className="text-red-400" />
                 </div>
                 <h3 className="text-xl font-semibold text-white mb-2">
-                  {language === 'ar' ? 'حذف المستخدم' : 'Delete User'}
+                  {t('deleteUser')}
                 </h3>
                 <p className="text-dark-400 mb-6">
-                  {language === 'ar'
-                    ? `هل أنت متأكد من حذف المستخدم "${userToDelete.name}"؟`
-                    : `Are you sure you want to delete "${userToDelete.name}"?`}
+                  {t('confirmDeleteUserName').replace('{name}', userToDelete.name)}
                 </p>
                 <div className="flex gap-3">
                   <button
                     onClick={() => setShowDeleteModal(false)}
                     className="flex-1 px-4 py-3 rounded-xl bg-dark-800 text-white font-medium hover:bg-dark-700 transition-colors"
                   >
-                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
+                    {t('cancel')}
                   </button>
                   <button
                     onClick={handleDeleteUser}
@@ -1111,7 +1099,7 @@ const Settings = () => {
                     ) : (
                       <>
                         <Trash2 size={18} />
-                        {language === 'ar' ? 'حذف' : 'Delete'}
+                        {t('delete')}
                       </>
                     )}
                   </button>
@@ -1146,25 +1134,23 @@ const Settings = () => {
                   <AlertTriangle size={32} className="text-red-400" />
                 </div>
                 <h3 className="text-xl font-semibold text-white mb-2 text-center">
-                  {language === 'ar' ? 'تحذير!' : 'Warning!'}
+                  {t('warning')}
                 </h3>
                 <p className="text-dark-400 mb-4 text-center">
-                  {language === 'ar'
-                    ? 'هذا الإجراء سيحذف جميع البيانات نهائياً. أدخل كلمة المرور للتأكيد.'
-                    : 'This action will permanently delete all data. Enter your password to confirm.'}
+                  {t('resetConfirmDesc')}
                 </p>
 
                 {/* Data that will be deleted */}
                 <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20">
                   <p className="text-sm text-red-400 font-medium mb-2">
-                    {language === 'ar' ? 'سيتم حذف:' : 'Will be deleted:'}
+                    {t('willBeDeleted')}
                   </p>
                   <ul className="text-sm text-dark-400 space-y-1">
-                    <li>• {language === 'ar' ? 'جميع المنتجات والمخزون' : 'All products and stock'}</li>
-                    <li>• {language === 'ar' ? 'جميع المبيعات والمشتريات' : 'All sales and purchases'}</li>
-                    <li>• {language === 'ar' ? 'جميع العملاء والموردين' : 'All clients and suppliers'}</li>
-                    <li>• {language === 'ar' ? 'جميع المصروفات والمستندات' : 'All expenses and documents'}</li>
-                    <li>• {language === 'ar' ? 'جميع الموظفين والرواتب' : 'All employers and payroll'}</li>
+                    <li>• {t('allProductsAndStock')}</li>
+                    <li>• {t('allSalesAndPurchases')}</li>
+                    <li>• {t('allClientsAndSuppliers')}</li>
+                    <li>• {t('allExpensesAndDocs')}</li>
+                    <li>• {t('allEmployersAndPayroll')}</li>
                   </ul>
                 </div>
 
@@ -1177,7 +1163,7 @@ const Settings = () => {
                 {/* Password Input */}
                 <div className="mb-6">
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {language === 'ar' ? 'كلمة المرور' : 'Password'}
+                    {t('password')}
                   </label>
                   <div className="relative">
                     <Lock className="absolute left-4 top-1/2 -translate-y-1/2 w-5 h-5 text-dark-500" />
@@ -1186,7 +1172,7 @@ const Settings = () => {
                       value={resetPassword}
                       onChange={(e) => setResetPassword(e.target.value)}
                       className="w-full pl-12 pr-12 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-red-500 transition-colors"
-                      placeholder={language === 'ar' ? 'أدخل كلمة المرور' : 'Enter your password'}
+                      placeholder={t('enterYourPassword')}
                     />
                     <button
                       type="button"
@@ -1203,7 +1189,7 @@ const Settings = () => {
                     onClick={() => setShowResetModal(false)}
                     className="flex-1 px-4 py-3 rounded-xl bg-dark-800 text-white font-medium hover:bg-dark-700 transition-colors"
                   >
-                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
+                    {t('cancel')}
                   </button>
                   <button
                     onClick={handleReset}
@@ -1215,7 +1201,7 @@ const Settings = () => {
                     ) : (
                       <>
                         <RefreshCw size={18} />
-                        {language === 'ar' ? 'إعادة تعيين' : 'Reset'}
+                        {t('reset')}
                       </>
                     )}
                   </button>
@@ -1258,7 +1244,7 @@ const Settings = () => {
                   )}
                 </div>
                 <h3 className="text-xl font-semibold text-white mb-2 text-center">
-                  {language === 'ar' ? 'تعديل الكمية' : 'Edit Quantity'}
+                  {t('editQuantity')}
                 </h3>
                 <p className="text-dark-400 mb-4 text-center">
                   {editingItem.name}
@@ -1274,7 +1260,7 @@ const Settings = () => {
                 <div className="mb-4 p-3 rounded-xl bg-dark-800/50 border border-dark-700/50">
                   <div className="flex justify-between items-center">
                     <span className="text-dark-400 text-sm">
-                      {language === 'ar' ? 'الكمية الحالية:' : 'Current Quantity:'}
+                      {t('currentQuantityColon')}
                     </span>
                     <span className="text-white font-semibold">
                       {editingItem.quantity || 0} {editingItem.unit || (editingItem.type === 'stock' ? 'kg' : 'pcs')}
@@ -1285,7 +1271,7 @@ const Settings = () => {
                 {/* New Quantity Input */}
                 <div className="mb-6">
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {language === 'ar' ? 'الكمية الجديدة' : 'New Quantity'}
+                    {t('newQuantityLabel')}
                   </label>
                   <div className="relative">
                     <input
@@ -1299,7 +1285,7 @@ const Settings = () => {
                         }
                       }}
                       className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                      placeholder={language === 'ar' ? 'أدخل الكمية' : 'Enter quantity'}
+                      placeholder={t('enterQuantity')}
                       autoFocus
                     />
                     <span className="absolute right-4 top-1/2 -translate-y-1/2 text-dark-400">
@@ -1317,7 +1303,7 @@ const Settings = () => {
                     }}
                     className="flex-1 px-4 py-3 rounded-xl bg-dark-800 text-white font-medium hover:bg-dark-700 transition-colors"
                   >
-                    {language === 'ar' ? 'إلغاء' : 'Cancel'}
+                    {t('cancel')}
                   </button>
                   <button
                     onClick={handleSaveQuantity}
@@ -1333,7 +1319,7 @@ const Settings = () => {
                     ) : (
                       <>
                         <Save size={18} />
-                        {language === 'ar' ? 'حفظ' : 'Save'}
+                        {t('save')}
                       </>
                     )}
                   </button>

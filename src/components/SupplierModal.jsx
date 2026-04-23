@@ -14,6 +14,11 @@ const SupplierModal = ({ isOpen, onClose, onSave, editItem }) => {
     balance: ''
   });
 
+  // 3-way opening balance sign: 'none' | 'owes' (shop owes supplier, negative) |
+  // 'credit' (shop has prepayment credit, positive). Only shown in ADD mode.
+  const [balanceSign, setBalanceSign] = useState('none');
+  const [balanceAmount, setBalanceAmount] = useState('');
+
   const [errors, setErrors] = useState({});
 
   useEffect(() => {
@@ -36,6 +41,8 @@ const SupplierModal = ({ isOpen, onClose, onSave, editItem }) => {
         balance: ''
       });
     }
+    setBalanceSign('none');
+    setBalanceAmount('');
     setErrors({});
   }, [editItem, isOpen]);
 
@@ -47,6 +54,19 @@ const SupplierModal = ({ isOpen, onClose, onSave, editItem }) => {
     }
   };
 
+  const parsedOpeningAmount = parseFloat(balanceAmount);
+  const openingNeedsAmount = balanceSign !== 'none';
+  const openingAmountValid = !openingNeedsAmount ||
+    (Number.isFinite(parsedOpeningAmount) && parsedOpeningAmount > 0);
+
+  const computeInitialBalance = () => {
+    if (balanceSign === 'none') return 0;
+    const amt = parseFloat(balanceAmount) || 0;
+    if (balanceSign === 'credit') return amt;   // prepayment credit (+)
+    if (balanceSign === 'owes') return -amt;    // shop owes them (−)
+    return 0;
+  };
+
   const validate = () => {
     const newErrors = {};
     if (!formData.name.trim()) {
@@ -55,19 +75,31 @@ const SupplierModal = ({ isOpen, onClose, onSave, editItem }) => {
     if (formData.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(formData.email)) {
       newErrors.email = t('invalidEmailFormat');
     }
-    if (formData.balance && isNaN(parseFloat(formData.balance))) {
+    if (editItem && formData.balance && isNaN(parseFloat(formData.balance))) {
       newErrors.balance = t('mustBeValidNumber');
     }
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
 
+  const canSubmit = formData.name.trim().length > 0 && openingAmountValid;
+
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (validate()) {
+    if (!validate() || !canSubmit) return;
+    if (editItem) {
+      // Edit path — preserve existing behaviour (direct balance field)
       onSave({
         ...formData,
         balance: parseFloat(formData.balance) || 0,
+      });
+    } else {
+      // Add path — opening balance via signed sign toggle + positive amount.
+      // Backend interprets `initial_balance` (+ = prepayment credit, − = shop owes).
+      onSave({
+        ...formData,
+        balance: 0,
+        initial_balance: computeInitialBalance(),
       });
     }
   };
@@ -186,29 +218,88 @@ const SupplierModal = ({ isOpen, onClose, onSave, editItem }) => {
               />
             </div>
 
-            {/* Balance */}
-            <div>
-              <label className="block text-sm font-medium text-dark-300 mb-2">
-                {t('currentBalance')}
-              </label>
-              <input
-                type="text"
-                inputMode="decimal"
-                name="balance"
-                value={formData.balance}
-                onChange={handleChange}
-                placeholder="0.00"
-                className={`w-full px-4 py-3 rounded-xl bg-dark-800 border ${
-                  errors.balance ? 'border-red-500' : 'border-dark-700'
-                } text-white placeholder-dark-500 focus:outline-none focus:border-orange-500 transition-colors`}
-              />
-              {errors.balance && (
-                <p className="mt-1 text-sm text-red-400">{errors.balance}</p>
-              )}
-              <p className="mt-1 text-xs text-dark-500">
-                {t('youOweSupplier')}
-              </p>
-            </div>
+            {/* Opening balance (ADD mode only) — 3-way sign toggle mirroring
+                mobile Clients. Positive-only amount; sign determines direction. */}
+            {!editItem && (
+              <div>
+                <label className="block text-sm font-medium text-dark-300 mb-2">
+                  {t('supplierOpeningBalance')}
+                </label>
+                <div
+                  className="flex rounded-xl p-1 mb-2"
+                  style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                >
+                  {[
+                    { id: 'none',   label: t('openingBalanceNone'),   activeColor: '#9ca3af', activeBg: 'rgba(156,163,175,0.12)', activeBorder: 'rgba(156,163,175,0.3)' },
+                    { id: 'owes',   label: t('supplierOwesUs'),       activeColor: '#f87171', activeBg: 'rgba(239,68,68,0.12)',   activeBorder: 'rgba(239,68,68,0.3)'   },
+                    { id: 'credit', label: t('supplierPrepayment'),   activeColor: '#34d399', activeBg: 'rgba(16,185,129,0.12)',  activeBorder: 'rgba(16,185,129,0.3)'  },
+                  ].map(({ id, label, activeColor, activeBg, activeBorder }) => (
+                    <button
+                      key={id}
+                      type="button"
+                      onClick={() => setBalanceSign(id)}
+                      className="flex-1 py-2 px-1 rounded-lg text-[11px] font-semibold transition-all leading-tight"
+                      style={{
+                        background: balanceSign === id ? activeBg : 'transparent',
+                        color:      balanceSign === id ? activeColor : '#6b7280',
+                        border:     balanceSign === id ? `1px solid ${activeBorder}` : '1px solid transparent',
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                {balanceSign !== 'none' && (
+                  <input
+                    type="number"
+                    inputMode="decimal"
+                    min="0"
+                    step="0.01"
+                    value={balanceAmount}
+                    onChange={(e) => setBalanceAmount(e.target.value)}
+                    placeholder="0.00"
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 text-white placeholder-dark-500 focus:outline-none transition-colors"
+                    style={{
+                      border: `1px solid ${balanceSign === 'credit' ? 'rgba(16,185,129,0.35)' : 'rgba(239,68,68,0.35)'}`,
+                      color:  balanceSign === 'credit' ? '#34d399' : '#f87171',
+                    }}
+                  />
+                )}
+                <p className="mt-1 text-xs text-dark-500">
+                  {balanceSign === 'owes'
+                    ? t('youOweSupplier')
+                    : balanceSign === 'credit'
+                      ? t('supplierPrepayment')
+                      : t('openingBalanceNone')}
+                </p>
+              </div>
+            )}
+
+            {/* Current balance field — EDIT mode only (legacy direct edit) */}
+            {editItem && (
+              <div>
+                <label className="block text-sm font-medium text-dark-300 mb-2">
+                  {t('currentBalance')}
+                </label>
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  name="balance"
+                  value={formData.balance}
+                  onChange={handleChange}
+                  placeholder="0.00"
+                  className={`w-full px-4 py-3 rounded-xl bg-dark-800 border ${
+                    errors.balance ? 'border-red-500' : 'border-dark-700'
+                  } text-white placeholder-dark-500 focus:outline-none focus:border-orange-500 transition-colors`}
+                />
+                {errors.balance && (
+                  <p className="mt-1 text-sm text-red-400">{errors.balance}</p>
+                )}
+                <p className="mt-1 text-xs text-dark-500">
+                  {t('youOweSupplier')}
+                </p>
+              </div>
+            )}
 
             {/* Notes */}
             <div>
@@ -236,7 +327,8 @@ const SupplierModal = ({ isOpen, onClose, onSave, editItem }) => {
               </button>
               <button
                 type="submit"
-                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold hover:shadow-lg hover:shadow-orange-500/25 transition-all"
+                disabled={!canSubmit}
+                className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-amber-500 text-white font-semibold hover:shadow-lg hover:shadow-orange-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
               >
                 <Save size={18} />
                 {editItem ? t('update') : t('save')}

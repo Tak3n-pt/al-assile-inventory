@@ -79,9 +79,9 @@ const Sidebar = () => {
 
   const getRoleLabel = (role) => {
     const labels = {
-      admin: language === 'ar' ? 'مدير النظام' : language === 'fr' ? 'Administrateur' : 'Administrator',
-      manager: language === 'ar' ? 'مدير' : language === 'fr' ? 'Responsable' : 'Manager',
-      sales: language === 'ar' ? 'موظف مبيعات' : language === 'fr' ? 'Ventes' : 'Sales'
+      admin: t('roleAdmin'),
+      manager: t('roleManager'),
+      sales: t('roleSales')
     };
     return labels[role] || role;
   };
@@ -293,10 +293,10 @@ const Sidebar = () => {
                     className="min-w-0"
                   >
                     <h1 className="text-lg font-bold text-white tracking-tight">
-                      {language === 'ar' ? 'الأصيل' : 'Al Assile'}
+                      {t('companyName')}
                     </h1>
                     <p className="text-xs text-dark-500 font-medium">
-                      {language === 'ar' ? 'منتجات التمور' : language === 'fr' ? 'Produits de Dattes' : 'Date Products'}
+                      {t('businessType')}
                     </p>
                   </motion.div>
                 )}

@@ -3,8 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <!-- CSP for Electron app -->
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval' file: http://localhost:*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' http://localhost:* ws://localhost:*; img-src 'self' data: file:;">
+  <!-- CSP: restrict renderer to local resources. Network access for cloud sync happens in the main process, not here.
+       script-src has no 'unsafe-inline' — Vite emits external bundles only (verified against dist/index.html).
+       style-src keeps 'unsafe-inline' because framer-motion injects inline style= attributes for animations. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self' file: http://localhost:*; script-src 'self' file: http://localhost:*; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com data:; connect-src 'self' http://localhost:* ws://localhost:*; img-src 'self' data: file:; object-src 'none'; base-uri 'self';">
   <title>Inventory Manager</title>
 </head>
 <body>

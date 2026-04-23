@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, User, Save, Phone, Mail, MapPin, FileText, Tag } from 'lucide-react';
+import { X, User, Save, Phone, Mail, MapPin, FileText, Tag, Ban, ShieldCheck } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import CustomSelect from './CustomSelect';
 
@@ -16,7 +16,8 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem, categories = [] }) => 
     email: '',
     address: '',
     balance: '',
-    notes: ''
+    notes: '',
+    credit_blocked: false
   });
 
   const [errors, setErrors] = useState({});
@@ -31,7 +32,8 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem, categories = [] }) => 
         email: editItem.email || '',
         address: editItem.address || '',
         balance: editItem.balance || '',
-        notes: editItem.notes || ''
+        notes: editItem.notes || '',
+        credit_blocked: !!editItem.credit_blocked
       });
     } else {
       setFormData({
@@ -42,7 +44,8 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem, categories = [] }) => 
         email: '',
         address: '',
         balance: '',
-        notes: ''
+        notes: '',
+        credit_blocked: false
       });
     }
     setErrors({});
@@ -83,6 +86,7 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem, categories = [] }) => 
         category_id: createNewCategory ? null : formData.category_id || null,
         new_category_name: createNewCategory ? formData.new_category_name.trim() : '',
         balance: parseFloat(formData.balance) || 0,
+        credit_blocked: formData.credit_blocked ? 1 : 0,
       });
     }
   };
@@ -307,6 +311,45 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem, categories = [] }) => 
                 />
               </div>
             </div>
+
+            {/* Cash-only (credit-block) toggle. Prevents staff from selling on
+                partial/credit to a client the owner has flagged as risky. */}
+            <label
+              className="flex items-start gap-3 p-3 rounded-xl cursor-pointer transition-colors"
+              style={{
+                background: formData.credit_blocked ? 'rgba(239,68,68,0.08)' : 'rgba(255,255,255,0.02)',
+                border: formData.credit_blocked ? '1px solid rgba(239,68,68,0.3)' : '1px solid rgba(255,255,255,0.06)',
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={formData.credit_blocked}
+                onChange={e => setFormData(p => ({ ...p, credit_blocked: e.target.checked }))}
+                className="mt-0.5 w-4 h-4 rounded"
+              />
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  {formData.credit_blocked
+                    ? <Ban size={16} className="text-red-400" />
+                    : <ShieldCheck size={16} className="text-dark-500" />}
+                  <span className="text-sm font-semibold text-white">{t('cashOnlyClient')}</span>
+                </div>
+                <p className="text-xs mt-1 text-dark-400">{t('cashOnlyClientDesc')}</p>
+              </div>
+            </label>
+
+            {/* Last contact — read-only display when available. Populated by the
+                mobile WhatsApp reminder flow; desktop can read but not edit. */}
+            {editItem && editItem.last_contact_at && (
+              <div className="p-3 rounded-xl" style={{ background: 'rgba(59,130,246,0.06)', border: '1px solid rgba(59,130,246,0.15)' }}>
+                <p className="text-xs font-semibold mb-1" style={{ color: '#60a5fa' }}>
+                  {t('lastContactAt')}: {new Date(editItem.last_contact_at).toLocaleDateString('fr-DZ', { day: '2-digit', month: 'short', year: 'numeric' })}
+                </p>
+                {editItem.last_contact_note ? (
+                  <p className="text-xs italic text-dark-300">“{editItem.last_contact_note}”</p>
+                ) : null}
+              </div>
+            )}
 
             {/* Actions */}
             <div className="flex items-center justify-end gap-3 pt-4 border-t border-dark-700">

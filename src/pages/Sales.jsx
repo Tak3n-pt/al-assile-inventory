@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   ShoppingCart,
@@ -36,14 +36,24 @@ import { useLanguage } from '../contexts/LanguageContext';
 import { useNotification } from '../contexts/NotificationContext';
 import DocumentGeneratorModal from '../components/documents/DocumentGeneratorModal';
 import PostSaleDocumentChooser from '../components/documents/PostSaleDocumentChooser';
+import { roundMoney, formatCurrencyDZD as formatCurrency } from '../lib/format';
+import { searchProducts as rankProducts, splitForHighlight } from '../lib/search';
+import useDataChanged from '../hooks/useDataChanged';
 
 // Currency formatter for Algerian Dinar
-const formatCurrency = (value) => {
-  return new Intl.NumberFormat('fr-DZ', {
-    style: 'decimal',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(value || 0) + ' DZD';
+// Renders `text` with any parts matching `query` visually highlighted.
+// Diacritic-insensitive via splitForHighlight; safe with RTL text.
+const HighlightedText = ({ text, query, className = '' }) => {
+  const parts = splitForHighlight(text, query);
+  return (
+    <span className={className}>
+      {parts.map(([chunk, isMatch], i) =>
+        isMatch
+          ? <mark key={i} className="bg-emerald-400/20 text-emerald-300 rounded px-0.5">{chunk}</mark>
+          : <React.Fragment key={i}>{chunk}</React.Fragment>
+      )}
+    </span>
+  );
 };
 
 // ============================================
@@ -82,9 +92,25 @@ const CartItem = ({ item, onUpdateQuantity, onRemove, t }) => {
           <Minus size={16} />
         </button>
 
-        <span className={`w-10 text-center font-semibold ${isAtMax ? 'text-amber-400' : 'text-white'}`}>
-          {item.quantity}
-        </span>
+        <input
+          type="text"
+          inputMode="decimal"
+          value={item.quantity}
+          onChange={(e) => {
+            const raw = e.target.value.replace(',', '.');
+            if (raw === '' || raw === '.') {
+              onUpdateQuantity(item.id, 0);
+              return;
+            }
+            const n = parseFloat(raw);
+            if (!isNaN(n) && n >= 0) {
+              const capped = item.maxQuantity ? Math.min(n, item.maxQuantity) : n;
+              onUpdateQuantity(item.id, capped);
+            }
+          }}
+          onFocus={(e) => e.target.select()}
+          className={`w-14 text-center font-semibold rounded-lg py-1 bg-dark-700 border border-dark-600 focus:outline-none focus:border-emerald-500 ${isAtMax ? 'text-amber-400' : 'text-white'}`}
+        />
 
         <button
           onClick={() => onUpdateQuantity(item.id, item.quantity + 1)}
@@ -117,12 +143,13 @@ const CartItem = ({ item, onUpdateQuantity, onRemove, t }) => {
 // ============================================
 // PRODUCT CARD COMPONENT
 // ============================================
-const ProductCard = ({ product, onAdd, onToggleFavorite, isInCart, t }) => {
+const ProductCard = ({ product, onAdd, onToggleFavorite, isInCart, t, query = '', isHighlighted = false, cardRef }) => {
   const isOutOfStock = (product.quantity || 0) <= 0;
   const isLowStock = (product.quantity || 0) <= (product.min_stock_alert || 0) && (product.min_stock_alert || 0) > 0;
 
   return (
     <motion.button
+      ref={cardRef}
       whileHover={{ scale: isOutOfStock ? 1 : 1.02, y: isOutOfStock ? 0 : -2 }}
       whileTap={{ scale: isOutOfStock ? 1 : 0.98 }}
       onClick={() => !isOutOfStock && onAdd(product)}
@@ -130,9 +157,11 @@ const ProductCard = ({ product, onAdd, onToggleFavorite, isInCart, t }) => {
       className={`relative p-4 rounded-xl border transition-all text-left
         ${isOutOfStock
           ? 'bg-dark-800/30 border-dark-700/30 opacity-60 cursor-not-allowed'
-          : isInCart
-            ? 'bg-emerald-500/10 border-emerald-500/30'
-            : 'bg-dark-800/50 border-dark-700/50 hover:border-dark-600/50'
+          : isHighlighted
+            ? 'bg-emerald-500/15 border-emerald-400 ring-2 ring-emerald-400/40'
+            : isInCart
+              ? 'bg-emerald-500/10 border-emerald-500/30'
+              : 'bg-dark-800/50 border-dark-700/50 hover:border-dark-600/50'
         }`}
     >
       {/* Favorite Toggle */}
@@ -180,7 +209,9 @@ const ProductCard = ({ product, onAdd, onToggleFavorite, isInCart, t }) => {
       )}
 
       {/* Product Info */}
-      <h3 className="font-semibold text-white text-sm truncate mb-1">{product.name}</h3>
+      <h3 className="font-semibold text-white text-sm truncate mb-1">
+        <HighlightedText text={product.name} query={query} />
+      </h3>
       <div className="flex items-center justify-between">
         <p className="text-lg font-bold text-emerald-400">{formatCurrency(product.selling_price)}</p>
         <span className={`text-xs font-medium ${isOutOfStock ? 'text-red-400' : isLowStock ? 'text-amber-400' : 'text-dark-400'}`}>
@@ -192,7 +223,9 @@ const ProductCard = ({ product, onAdd, onToggleFavorite, isInCart, t }) => {
       {product.barcode && (
         <div className="mt-2 flex items-center gap-1.5 text-xs text-dark-400">
           <Barcode size={14} />
-          <span className="truncate">{product.barcode}</span>
+          <span className="truncate">
+            <HighlightedText text={product.barcode} query={query} />
+          </span>
         </div>
       )}
 
@@ -234,9 +267,16 @@ const ClientSelector = ({ clients, selectedClient, onSelect, onSearch, searchQue
               <p className="font-semibold text-white">{selectedClient.name}</p>
               <p className="text-xs text-dark-400">
                 {selectedClient.phone || t('noPhone')}
+                {/* Sign convention (matches Clients page): negative balance = client owes shop (debt),
+                    positive balance = shop owes client (credit). */}
+                {selectedClient.balance < 0 && (
+                  <span className="text-red-400 ml-2">
+                    ({t('owes')} {formatCurrency(Math.abs(selectedClient.balance))})
+                  </span>
+                )}
                 {selectedClient.balance > 0 && (
-                  <span className="text-amber-400 ml-2">
-                    ({t('owes')} {formatCurrency(selectedClient.balance)})
+                  <span className="text-emerald-400 ml-2">
+                    ({t('credit')} {formatCurrency(selectedClient.balance)})
                   </span>
                 )}
               </p>
@@ -313,9 +353,14 @@ const ClientSelector = ({ clients, selectedClient, onSelect, onSearch, searchQue
                     <p className="text-white font-medium text-sm">{client.name}</p>
                     <p className="text-xs text-dark-400">{client.phone || t('noPhone')}</p>
                   </div>
+                  {client.balance < 0 && (
+                    <span className="text-xs text-red-400 font-medium">
+                      -{formatCurrency(Math.abs(client.balance))}
+                    </span>
+                  )}
                   {client.balance > 0 && (
-                    <span className="text-xs text-amber-400 font-medium">
-                      {formatCurrency(client.balance)}
+                    <span className="text-xs text-emerald-400 font-medium">
+                      +{formatCurrency(client.balance)}
                     </span>
                   )}
                 </button>
@@ -340,19 +385,54 @@ const PaymentModal = ({
   t,
   isProcessing
 }) => {
-  const [paymentMethod, setPaymentMethod] = useState('cash');
+  // Payment type: 'full' | 'partial' | 'credit'
+  const [paymentType, setPaymentType] = useState('full');
   const [paidAmount, setPaidAmount] = useState(total);
   const [notes, setNotes] = useState('');
+  // Overpayment disposition: 'change' (give back, current default) or 'credit' (keep on account)
+  const [overpayDisposition, setOverpayDisposition] = useState('change');
 
   useEffect(() => {
     if (isOpen) {
+      setPaymentType('full');
       setPaidAmount(total);
+      setNotes('');
+      setOverpayDisposition('change');
     }
-  }, [isOpen, total]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen]);
 
-  const change = paidAmount - total;
-  const remaining = total - paidAmount;
+  useEffect(() => {
+    if (paymentType === 'full') setPaidAmount(total);
+    else if (paymentType === 'credit') setPaidAmount(0);
+  }, [paymentType, total]);
+
+  // If the cashier swaps in a cash-only client while partial/credit is active,
+  // reset the payment type back to full so the UI is consistent with the guard.
+  useEffect(() => {
+    if (client?.credit_blocked && (paymentType === 'partial' || paymentType === 'credit')) {
+      setPaymentType('full');
+    }
+  }, [client?.credit_blocked, paymentType]);
+
+  const parseAmount = (raw, fallback) => {
+    if (raw === '' || raw === '.') return 0;
+    const n = parseFloat(raw);
+    return isNaN(n) ? fallback : n;
+  };
+
+  const change = roundMoney(paidAmount - total);
+  const remaining = roundMoney(total - paidAmount);
+  const isOverpay = paymentType === 'full' && paidAmount > total && change > 0;
   const status = paidAmount >= total ? 'paid' : paidAmount > 0 ? 'partial' : 'pending';
+  const needsClient = paymentType === 'partial' || paymentType === 'credit' || (isOverpay && overpayDisposition === 'credit');
+  const clientMissing = needsClient && !client;
+  // Cash-only clients: block completion regardless of which payment type is
+  // selected — the button-disable above prevents the user from picking these
+  // in the first place, but this closes the case where the state was set
+  // before the client was chosen.
+  const blockedByCashOnly = !!client?.credit_blocked && (paymentType === 'partial' || paymentType === 'credit' || (isOverpay && overpayDisposition === 'credit'));
+  const canComplete = !clientMissing && !blockedByCashOnly && (paymentType === 'credit' || paidAmount > 0);
 
   const handleQuickAmount = (amount) => {
     setPaidAmount(amount);
@@ -406,101 +486,214 @@ const PaymentModal = ({
         </div>
 
         {/* Content */}
-        <div className="p-6 space-y-6 overflow-y-auto flex-1">
+        <div className="p-6 space-y-5 overflow-y-auto flex-1">
           {/* Total Display */}
           <div className="text-center py-4 bg-dark-800/50 rounded-xl border border-dark-700/50">
             <p className="text-dark-400 text-sm mb-1">{t('totalAmount')}</p>
             <p className="text-4xl font-bold text-white">{formatCurrency(total)}</p>
+            {client && (
+              <p className="text-xs mt-2" style={{ color: '#64748b' }}>
+                {client.name}
+                {client.balance !== undefined && client.balance !== 0 && (
+                  // Sign convention: negative = client owes shop; positive = shop owes client
+                  <span className={client.balance < 0 ? 'text-red-400 ml-2' : 'text-emerald-400 ml-2'}>
+                    ({client.balance < 0 ? t('owes') : t('credit')} {Math.abs(client.balance).toLocaleString()} DZD)
+                  </span>
+                )}
+              </p>
+            )}
           </div>
 
-          {/* Payment Method */}
+          {/* Payment Type — 3 big buttons */}
           <div>
             <label className="block text-sm font-medium text-dark-300 mb-3">
-              {t('paymentMethod')}
+              {t('paymentType')}
             </label>
-            <div className="grid grid-cols-2 gap-3">
+            {/* Cash-only guard: if the selected client is credit-blocked by
+                the admin, partial and credit buttons are disabled and a red
+                banner explains why. Staff can't accidentally sell on credit
+                to a flagged client. */}
+            {client?.credit_blocked ? (
+              <div className="mb-3 p-3 rounded-xl flex items-start gap-3"
+                   style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.3)' }}>
+                <AlertCircle size={18} className="text-red-400 flex-shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-semibold text-red-400">{t('clientIsCashOnly')}</p>
+                  <p className="text-xs text-dark-300 mt-0.5">{t('clientIsCashOnlyDesc')}</p>
+                </div>
+              </div>
+            ) : null}
+            <div className="grid grid-cols-3 gap-2">
               <button
-                onClick={() => setPaymentMethod('cash')}
-                className={`flex items-center justify-center gap-3 px-4 py-3 rounded-xl border
-                           transition-all ${paymentMethod === 'cash'
-                  ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
-                  : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'
+                onClick={() => setPaymentType('full')}
+                className={`flex flex-col items-center gap-1 px-3 py-4 rounded-xl border transition-all ${
+                  paymentType === 'full'
+                    ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
+                    : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'
                 }`}
               >
-                <Banknote size={20} />
-                <span className="font-medium">{t('cash')}</span>
+                <Check size={18} />
+                <span className="text-xs font-semibold">{t('fullPayment')}</span>
               </button>
               <button
-                onClick={() => setPaymentMethod('credit')}
-                className={`flex items-center justify-center gap-3 px-4 py-3 rounded-xl border
-                           transition-all ${paymentMethod === 'credit'
-                  ? 'bg-blue-500/10 border-blue-500/50 text-blue-400'
-                  : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'
-                }`}
+                onClick={() => { if (!client?.credit_blocked) setPaymentType('partial'); }}
+                disabled={!!client?.credit_blocked}
+                className={`flex flex-col items-center gap-1 px-3 py-4 rounded-xl border transition-all ${
+                  paymentType === 'partial'
+                    ? 'bg-amber-500/10 border-amber-500/50 text-amber-400'
+                    : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'
+                } ${client?.credit_blocked ? 'opacity-40 cursor-not-allowed' : ''}`}
               >
-                <CreditCard size={20} />
-                <span className="font-medium">{t('credit')}</span>
+                <DollarSign size={18} />
+                <span className="text-xs font-semibold">{t('partialPayment')}</span>
+              </button>
+              <button
+                onClick={() => { if (!client?.credit_blocked) setPaymentType('credit'); }}
+                disabled={!!client?.credit_blocked}
+                className={`flex flex-col items-center gap-1 px-3 py-4 rounded-xl border transition-all ${
+                  paymentType === 'credit'
+                    ? 'bg-red-500/10 border-red-500/50 text-red-400'
+                    : 'bg-dark-800/50 border-dark-700 text-dark-400 hover:border-dark-600'
+                } ${client?.credit_blocked ? 'opacity-40 cursor-not-allowed' : ''}`}
+              >
+                <CreditCard size={18} />
+                <span className="text-xs font-semibold">{t('credit')}</span>
               </button>
             </div>
           </div>
 
-          {/* Paid Amount */}
-          <div>
-            <label className="block text-sm font-medium text-dark-300 mb-3">
-              {t('paidAmount')}
-            </label>
-            <div className="relative">
-              <Calculator className="absolute left-4 top-1/2 -translate-y-1/2 text-dark-400" size={20} />
-              <input
-                type="text"
-                inputMode="decimal"
-                value={paidAmount}
-                onChange={(e) => setPaidAmount(parseFloat(e.target.value) || 0)}
-                className="w-full pl-12 pr-4 py-3 bg-dark-800 border border-dark-700 rounded-xl
-                         text-xl font-semibold text-white text-right focus:outline-none
-                         focus:border-emerald-500"
-              />
+          {/* Client required warning for partial / credit */}
+          {clientMissing && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30 flex items-start gap-3">
+              <AlertCircle size={20} className="text-red-400 flex-shrink-0 mt-0.5" />
+              <div>
+                <p className="text-sm font-semibold text-red-400">{t('clientRequired')}</p>
+                <p className="text-xs text-dark-400 mt-1">
+                  {t('clientRequiredDesc')}
+                </p>
+              </div>
             </div>
+          )}
 
-            {/* Quick Amount Buttons */}
-            <div className="flex gap-2 mt-3">
-              <button
-                onClick={() => handleQuickAmount(total)}
-                className="flex-1 px-3 py-2 bg-dark-700 rounded-lg text-sm text-dark-300
-                         hover:text-white hover:bg-dark-600 transition-all"
-              >
-                {t('exactAmount')}
-              </button>
-              {quickAmounts.map((amount) => (
+          {/* Full payment — allow overpayment for change */}
+          {paymentType === 'full' && !clientMissing && (
+            <div>
+              <label className="block text-sm font-medium text-dark-300 mb-3">
+                {t('amountReceived')}
+              </label>
+              <div className="relative">
+                <Calculator className="absolute left-4 top-1/2 -translate-y-1/2 text-dark-400" size={20} />
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={paidAmount}
+                  onChange={(e) => setPaidAmount(parseAmount(e.target.value, paidAmount))}
+                  className="w-full pl-12 pr-4 py-3 bg-dark-800 border border-dark-700 rounded-xl text-xl font-semibold text-white text-right focus:outline-none focus:border-emerald-500"
+                />
+              </div>
+              <div className="flex gap-2 mt-3 flex-wrap">
                 <button
-                  key={amount}
-                  onClick={() => handleQuickAmount(amount)}
-                  className="px-3 py-2 bg-dark-700 rounded-lg text-sm text-dark-300
-                           hover:text-white hover:bg-dark-600 transition-all"
+                  onClick={() => setPaidAmount(total)}
+                  className="flex-1 px-3 py-2 bg-dark-700 rounded-lg text-sm text-dark-300 hover:text-white hover:bg-dark-600 transition-all"
                 >
-                  {amount.toLocaleString()}
+                  {t('exactAmount')}
                 </button>
-              ))}
+                {quickAmounts.map((amount) => (
+                  <button
+                    key={amount}
+                    onClick={() => setPaidAmount(amount)}
+                    className="px-3 py-2 bg-dark-700 rounded-lg text-sm text-dark-300 hover:text-white hover:bg-dark-600 transition-all"
+                  >
+                    {amount.toLocaleString()}
+                  </button>
+                ))}
+              </div>
+              {isOverpay && (
+                <div className="mt-3 p-4 rounded-xl bg-blue-500/10 border border-blue-500/30">
+                  <p className="text-sm font-semibold text-blue-400 mb-1">
+                    {t('overpayChooseChange')}
+                  </p>
+                  <p className="text-2xl font-bold text-blue-400 mb-3">+{formatCurrency(change)}</p>
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => setOverpayDisposition('change')}
+                      className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all ${
+                        overpayDisposition === 'change'
+                          ? 'bg-blue-500/20 border border-blue-400 text-blue-300'
+                          : 'bg-dark-800 border border-dark-700 text-dark-400 hover:text-white'
+                      }`}
+                    >
+                      {t('giveChange')}
+                    </button>
+                    <button
+                      onClick={() => setOverpayDisposition('credit')}
+                      disabled={!client}
+                      className={`flex-1 px-3 py-2.5 rounded-xl text-sm font-semibold transition-all disabled:opacity-40 disabled:cursor-not-allowed ${
+                        overpayDisposition === 'credit'
+                          ? 'bg-emerald-500/20 border border-emerald-400 text-emerald-300'
+                          : 'bg-dark-800 border border-dark-700 text-dark-400 hover:text-white'
+                      }`}
+                    >
+                      {t('keepAsCredit')}
+                    </button>
+                  </div>
+                  {!client && overpayDisposition === 'credit' && (
+                    <p className="text-xs mt-2 text-red-400">
+                      {t('clientRequired')} — {t('clientRequiredDesc')}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
-          </div>
+          )}
 
-          {/* Change/Remaining Display */}
-          <div className={`p-4 rounded-xl border ${
-            paidAmount >= total
-              ? 'bg-emerald-500/10 border-emerald-500/30'
-              : 'bg-amber-500/10 border-amber-500/30'
-          }`}>
-            <div className="flex justify-between items-center">
-              <span className={paidAmount >= total ? 'text-emerald-400' : 'text-amber-400'}>
-                {paidAmount >= total ? t('change') : t('remaining')}
-              </span>
-              <span className={`text-2xl font-bold ${
-                paidAmount >= total ? 'text-emerald-400' : 'text-amber-400'
-              }`}>
-                {formatCurrency(paidAmount >= total ? change : remaining)}
-              </span>
+          {/* Partial payment input */}
+          {paymentType === 'partial' && !clientMissing && (
+            <div>
+              <label className="block text-sm font-medium text-dark-300 mb-3">
+                {t('amountPaid')}
+              </label>
+              <div className="relative">
+                <Calculator className="absolute left-4 top-1/2 -translate-y-1/2 text-dark-400" size={20} />
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={paidAmount}
+                  onChange={(e) => {
+                    const n = parseAmount(e.target.value, paidAmount);
+                    setPaidAmount(Math.min(Math.max(n, 0), total));
+                  }}
+                  className="w-full pl-12 pr-4 py-3 bg-dark-800 border border-dark-700 rounded-xl text-xl font-semibold text-white text-right focus:outline-none focus:border-amber-500"
+                />
+              </div>
+              {/* Quick percentage buttons */}
+              <div className="flex gap-2 mt-3">
+                {[25, 50, 75].map(pct => (
+                  <button
+                    key={pct}
+                    onClick={() => setPaidAmount(roundMoney(total * pct / 100))}
+                    className="flex-1 px-3 py-2 bg-dark-700 rounded-lg text-sm text-dark-300 hover:text-white hover:bg-dark-600 transition-all"
+                  >
+                    {pct}%
+                  </button>
+                ))}
+              </div>
+              <div className="mt-3 p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 flex justify-between items-center">
+                <span className="text-amber-400">{t('remaining')} ({t('addedToBalance')})</span>
+                <span className="text-xl font-bold text-amber-400">{formatCurrency(remaining)}</span>
+              </div>
             </div>
-          </div>
+          )}
+
+          {/* Credit — pay nothing now */}
+          {paymentType === 'credit' && !clientMissing && (
+            <div className="p-4 rounded-xl bg-red-500/10 border border-red-500/30">
+              <p className="text-sm text-red-400 font-semibold mb-1">{t('fullCreditNotice')}</p>
+              <p className="text-xs text-dark-400">
+                {formatCurrency(total)} {t('addedToBalance')}
+              </p>
+            </div>
+          )}
 
           {/* Notes */}
           <div>
@@ -518,6 +711,40 @@ const PaymentModal = ({
           </div>
         </div>
 
+        {/* Plain-language summary — "John will still owe 2500 DZD" */}
+        {(() => {
+          if (clientMissing) return null;
+          let tone = 'green', text = '';
+          const who = client?.name || t('customer');
+          if (paymentType === 'credit') {
+            tone = 'amber';
+            text = `${t('nothingNow')} — ${formatCurrency(total)} ${t('willBeDebt')}`;
+          } else if (paymentType === 'partial') {
+            tone = 'amber';
+            text = `${who} ${t('willStillOwe')} ${formatCurrency(remaining)}`;
+          } else if (isOverpay) {
+            tone = overpayDisposition === 'credit' ? 'green' : 'blue';
+            text = overpayDisposition === 'credit'
+              ? `${t('fullyPaid')} — ${formatCurrency(change)} ${t('keptAsCredit')}`
+              : `${t('fullyPaid')} — ${formatCurrency(change)} ${t('giveChange')}`;
+          } else if (paidAmount >= total && paidAmount > 0) {
+            tone = 'green';
+            text = t('fullyPaid');
+          } else {
+            return null;
+          }
+          const toneClass = tone === 'green'
+            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+            : tone === 'amber'
+              ? 'bg-amber-500/10 border-amber-500/30 text-amber-300'
+              : 'bg-blue-500/10 border-blue-500/30 text-blue-300';
+          return (
+            <div className={`mx-6 mb-0 mt-0 px-4 py-2.5 rounded-xl border text-sm font-semibold text-center ${toneClass}`}>
+              {text}
+            </div>
+          );
+        })()}
+
         {/* Footer */}
         <div className="flex gap-3 px-6 py-4 border-t border-dark-700 bg-dark-800/50">
           <button
@@ -529,15 +756,19 @@ const PaymentModal = ({
           </button>
           <button
             onClick={() => onComplete({
-              paidAmount,
-              paymentMethod,
+              // Overpay + "credit" → pass the FULL paidAmount so addSale credits the client;
+              // any other case → cap at total (change is returned in cash, not stored).
+              paidAmount: isOverpay && overpayDisposition === 'credit'
+                ? paidAmount
+                : Math.min(paidAmount, total),
+              paymentMethod: paymentType === 'credit' ? 'credit' : 'cash',
               notes,
-              status
+              status,
             })}
-            disabled={isProcessing}
+            disabled={isProcessing || !canComplete}
             className="flex-1 flex items-center justify-center gap-2 px-4 py-3 rounded-xl
                      bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-medium
-                     hover:from-emerald-600 hover:to-teal-600 transition-all disabled:opacity-50"
+                     hover:from-emerald-600 hover:to-teal-600 transition-all disabled:opacity-40 disabled:cursor-not-allowed"
           >
             {isProcessing ? (
               <RefreshCw size={20} className="animate-spin" />
@@ -564,7 +795,6 @@ const KeyboardShortcutsHelp = ({ isOpen, onClose, t }) => {
     { key: 'F1', action: t('focusBarcodeScanner') },
     { key: 'F2', action: t('focusProductSearch') },
     { key: 'F3', action: t('toggleFavorites') },
-    { key: 'F4', action: t('selectClient') },
     { key: 'F8', action: t('openPayment') },
     { key: 'F9', action: t('clearCart') },
     { key: 'Esc', action: t('closeModal') },
@@ -646,10 +876,13 @@ const SalesHistory = ({ t }) => {
     }
   };
 
-  // Load sales data
+  // Load sales data. Intentionally depends only on the filter mode — custom-range
+  // date typing fires one DB query per keystroke otherwise. The Apply button below
+  // calls loadSales() explicitly when the user finishes typing custom dates.
   useEffect(() => {
-    loadSales();
-  }, [dateFilter, customDateRange]);
+    if (dateFilter !== 'custom') loadSales();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dateFilter]);
 
   const loadSales = async () => {
     setLoading(true);
@@ -686,10 +919,10 @@ const SalesHistory = ({ t }) => {
   const totalPending = totalSales - totalPaid;
 
   const dateFilterOptions = [
-    { value: 'today', label: t('today') || 'Today' },
-    { value: 'week', label: t('thisWeek') || 'This Week' },
-    { value: 'month', label: t('thisMonth') || 'This Month' },
-    { value: 'custom', label: t('customRange') || 'Custom Range' }
+    { value: 'today', label: t('today') },
+    { value: 'week', label: t('thisWeek') },
+    { value: 'month', label: t('thisMonth') },
+    { value: 'custom', label: t('customRange') }
   ];
 
   return (
@@ -697,7 +930,7 @@ const SalesHistory = ({ t }) => {
       {/* Header with filters */}
       <div className="flex items-center justify-between mb-6">
         <div className="flex items-center gap-4">
-          <h2 className="text-xl font-semibold text-white">{t('salesHistory') || 'Sales History'}</h2>
+          <h2 className="text-xl font-semibold text-white">{t('salesHistory')}</h2>
 
           {/* Date Filter Dropdown */}
           <div className="relative">
@@ -730,7 +963,7 @@ const SalesHistory = ({ t }) => {
                 {dateFilter === 'custom' && (
                   <div className="p-4 border-t border-dark-700 space-y-3">
                     <div>
-                      <label className="block text-xs text-dark-400 mb-1">{t('startDate') || 'Start Date'}</label>
+                      <label className="block text-xs text-dark-400 mb-1">{t('startDate')}</label>
                       <input
                         type="date"
                         value={customDateRange.start}
@@ -739,7 +972,7 @@ const SalesHistory = ({ t }) => {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs text-dark-400 mb-1">{t('endDate') || 'End Date'}</label>
+                      <label className="block text-xs text-dark-400 mb-1">{t('endDate')}</label>
                       <input
                         type="date"
                         value={customDateRange.end}
@@ -748,10 +981,14 @@ const SalesHistory = ({ t }) => {
                       />
                     </div>
                     <button
-                      onClick={() => setShowDatePicker(false)}
-                      className="w-full px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors"
+                      onClick={() => {
+                        loadSales();
+                        setShowDatePicker(false);
+                      }}
+                      disabled={!customDateRange.start || !customDateRange.end}
+                      className="w-full px-4 py-2 bg-emerald-500 text-white rounded-lg hover:bg-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      {t('apply') || 'Apply'}
+                      {t('apply')}
                     </button>
                   </div>
                 )}
@@ -775,10 +1012,10 @@ const SalesHistory = ({ t }) => {
             <div className="w-10 h-10 bg-emerald-500/20 rounded-xl flex items-center justify-center">
               <DollarSign className="text-emerald-400" size={20} />
             </div>
-            <span className="text-dark-400">{t('totalSales') || 'Total Sales'}</span>
+            <span className="text-dark-400">{t('totalSales')}</span>
           </div>
           <p className="text-2xl font-bold text-white">{formatCurrency(totalSales)}</p>
-          <p className="text-sm text-dark-400 mt-1">{sales.length} {t('transactions') || 'transactions'}</p>
+          <p className="text-sm text-dark-400 mt-1">{sales.length} {t('transactions')}</p>
         </div>
 
         <div className="p-4 bg-dark-800/50 border border-dark-700/50 rounded-xl">
@@ -786,7 +1023,7 @@ const SalesHistory = ({ t }) => {
             <div className="w-10 h-10 bg-blue-500/20 rounded-xl flex items-center justify-center">
               <Check className="text-blue-400" size={20} />
             </div>
-            <span className="text-dark-400">{t('totalPaid') || 'Total Paid'}</span>
+            <span className="text-dark-400">{t('totalPaid')}</span>
           </div>
           <p className="text-2xl font-bold text-emerald-400">{formatCurrency(totalPaid)}</p>
         </div>
@@ -796,7 +1033,7 @@ const SalesHistory = ({ t }) => {
             <div className="w-10 h-10 bg-amber-500/20 rounded-xl flex items-center justify-center">
               <AlertCircle className="text-amber-400" size={20} />
             </div>
-            <span className="text-dark-400">{t('pending') || 'Pending'}</span>
+            <span className="text-dark-400">{t('pending')}</span>
           </div>
           <p className="text-2xl font-bold text-amber-400">{formatCurrency(totalPending)}</p>
         </div>
@@ -811,8 +1048,8 @@ const SalesHistory = ({ t }) => {
         ) : sales.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center">
             <History className="text-dark-600 mb-4" size={48} />
-            <p className="text-dark-400">{t('noSalesFound') || 'No sales found'}</p>
-            <p className="text-dark-500 text-sm mt-1">{t('tryDifferentDateRange') || 'Try a different date range'}</p>
+            <p className="text-dark-400">{t('noSalesFound')}</p>
+            <p className="text-dark-500 text-sm mt-1">{t('tryDifferentDateRange')}</p>
           </div>
         ) : (
           <div className="overflow-y-auto h-full">
@@ -820,12 +1057,12 @@ const SalesHistory = ({ t }) => {
               <thead className="bg-dark-800/50 sticky top-0">
                 <tr>
                   <th className="px-4 py-3 text-left text-xs font-medium text-dark-400 uppercase">#</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-dark-400 uppercase">{t('date') || 'Date'}</th>
-                  <th className="px-4 py-3 text-left text-xs font-medium text-dark-400 uppercase">{t('client') || 'Client'}</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-dark-400 uppercase">{t('total') || 'Total'}</th>
-                  <th className="px-4 py-3 text-right text-xs font-medium text-dark-400 uppercase">{t('paid') || 'Paid'}</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-dark-400 uppercase">{t('status') || 'Status'}</th>
-                  <th className="px-4 py-3 text-center text-xs font-medium text-dark-400 uppercase">{t('actions') || 'Actions'}</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-dark-400 uppercase">{t('date')}</th>
+                  <th className="px-4 py-3 text-left text-xs font-medium text-dark-400 uppercase">{t('client')}</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-dark-400 uppercase">{t('total')}</th>
+                  <th className="px-4 py-3 text-right text-xs font-medium text-dark-400 uppercase">{t('paid')}</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-dark-400 uppercase">{t('status')}</th>
+                  <th className="px-4 py-3 text-center text-xs font-medium text-dark-400 uppercase">{t('actions')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-dark-700/50">
@@ -836,7 +1073,7 @@ const SalesHistory = ({ t }) => {
                       {new Date(sale.date).toLocaleDateString()}
                     </td>
                     <td className="px-4 py-3 text-white">
-                      {sale.client_name || (t('walkInCustomer') || 'Walk-in')}
+                      {sale.client_name || t('walkInCustomer')}
                     </td>
                     <td className="px-4 py-3 text-right font-medium text-white">
                       {formatCurrency(sale.total)}
@@ -850,9 +1087,9 @@ const SalesHistory = ({ t }) => {
                           sale.status === 'partial' ? 'bg-amber-500/20 text-amber-400' :
                           'bg-red-500/20 text-red-400'}`}
                       >
-                        {sale.status === 'paid' ? (t('paid') || 'Paid') :
-                         sale.status === 'partial' ? (t('partial') || 'Partial') :
-                         (t('pending') || 'Pending')}
+                        {sale.status === 'paid' ? t('paid') :
+                         sale.status === 'partial' ? t('partial') :
+                         t('pending')}
                       </span>
                     </td>
                     <td className="px-4 py-3 text-center">
@@ -890,7 +1127,7 @@ const SalesHistory = ({ t }) => {
               {/* Modal Header */}
               <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700 bg-dark-800/50">
                 <div>
-                  <h3 className="text-lg font-semibold text-white">{t('saleDetails') || 'Sale Details'}</h3>
+                  <h3 className="text-lg font-semibold text-white">{t('saleDetails')}</h3>
                   <p className="text-sm text-dark-400">#{selectedSale.id} - {new Date(selectedSale.date).toLocaleDateString()}</p>
                 </div>
                 <button
@@ -909,14 +1146,14 @@ const SalesHistory = ({ t }) => {
                     <User className="text-orange-400" size={20} />
                   </div>
                   <div>
-                    <p className="font-medium text-white">{selectedSale.client_name || (t('walkInCustomer') || 'Walk-in Customer')}</p>
+                    <p className="font-medium text-white">{selectedSale.client_name || t('walkInCustomer')}</p>
                     <p className="text-sm text-dark-400">{selectedSale.client_phone || ''}</p>
                   </div>
                 </div>
 
                 {/* Items */}
                 <div className="space-y-2 mb-4">
-                  <h4 className="text-sm font-medium text-dark-400 uppercase">{t('items') || 'Items'}</h4>
+                  <h4 className="text-sm font-medium text-dark-400 uppercase">{t('items')}</h4>
                   {saleItems.map((item, idx) => (
                     <div key={idx} className="flex items-center justify-between p-3 bg-dark-800/30 rounded-lg">
                       <div>
@@ -931,26 +1168,26 @@ const SalesHistory = ({ t }) => {
                 {/* Totals */}
                 <div className="border-t border-dark-700 pt-4 space-y-2">
                   <div className="flex justify-between text-dark-400">
-                    <span>{t('subtotal') || 'Subtotal'}</span>
+                    <span>{t('subtotal')}</span>
                     <span>{formatCurrency(selectedSale.subtotal)}</span>
                   </div>
                   {selectedSale.discount > 0 && (
                     <div className="flex justify-between text-amber-400">
-                      <span>{t('discount') || 'Discount'}</span>
+                      <span>{t('discount')}</span>
                       <span>-{formatCurrency(selectedSale.discount)}</span>
                     </div>
                   )}
                   <div className="flex justify-between text-xl font-bold text-white pt-2">
-                    <span>{t('total') || 'Total'}</span>
+                    <span>{t('total')}</span>
                     <span>{formatCurrency(selectedSale.total)}</span>
                   </div>
                   <div className="flex justify-between text-emerald-400">
-                    <span>{t('paid') || 'Paid'}</span>
+                    <span>{t('paid')}</span>
                     <span>{formatCurrency(selectedSale.paid_amount)}</span>
                   </div>
                   {selectedSale.total - selectedSale.paid_amount > 0 && (
                     <div className="flex justify-between text-amber-400">
-                      <span>{t('remaining') || 'Remaining'}</span>
+                      <span>{t('remaining')}</span>
                       <span>{formatCurrency(selectedSale.total - selectedSale.paid_amount)}</span>
                     </div>
                   )}
@@ -974,6 +1211,15 @@ const Sales = () => {
   // Refs
   const barcodeInputRef = useRef(null);
   const searchInputRef = useRef(null);
+  // Attached to whichever result card currently holds the keyboard cursor so
+  // ArrowDown past the viewport auto-scrolls it into view.
+  const highlightedCardRef = useRef(null);
+  // Scanner state held outside React render: last scan to dedupe double-triggers,
+  // and a flag that pauses auto-refocus while the user is intentionally typing
+  // elsewhere. Concurrent scans are now allowed (the old scanInFlight drop was
+  // losing legitimate fast scans of different items).
+  const lastScanRef = useRef({ code: '', at: 0 });
+  const suspendAutoFocusRef = useRef(false);
 
   // Tab state
   const [activeTab, setActiveTab] = useState('pos'); // 'pos' or 'history'
@@ -989,6 +1235,8 @@ const Sales = () => {
   const [clientSearchQuery, setClientSearchQuery] = useState('');
   const [showFavoritesOnly, setShowFavoritesOnly] = useState(false);
   const [viewMode, setViewMode] = useState('grid'); // 'grid' or 'list'
+  // Keyboard-navigation cursor within the search results. Reset to 0 on query change.
+  const [highlightedIdx, setHighlightedIdx] = useState(0);
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [showShortcutsHelp, setShowShortcutsHelp] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -1002,6 +1250,50 @@ const Sales = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Auto-refresh on mobile sale sync, stock changes from other pages, etc.
+  useDataChanged(['products', 'clients', 'sales'], () => loadData());
+
+  // If the currently-selected client was deleted elsewhere (another tab, sync pull),
+  // clear the selection so the cashier doesn't submit a sale with a dangling client_id.
+  useEffect(() => {
+    if (selectedClient && !clients.some(c => c.id === selectedClient.id)) {
+      setSelectedClient(null);
+    } else if (selectedClient) {
+      // Refresh the snapshot to show up-to-date balance/phone/name after sync
+      const fresh = clients.find(c => c.id === selectedClient.id);
+      if (fresh && (fresh.balance !== selectedClient.balance || fresh.name !== selectedClient.name)) {
+        setSelectedClient(fresh);
+      }
+    }
+  }, [clients]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // When products reload (new stock, another terminal's sale, sync pull), refresh each
+  // cart line's maxQuantity so the +/- buttons don't permit exceeding the actual stock.
+  // The quantity itself is clamped if it went over.
+  useEffect(() => {
+    if (!products.length) return;
+    setCart(prevCart => {
+      let changed = false;
+      const next = prevCart.map(item => {
+        const p = products.find(pp => pp.id === item.product_id);
+        if (!p) return item;
+        const available = p.quantity || 0;
+        const newQty = Math.min(item.quantity, available);
+        if (newQty !== item.quantity || available !== item.maxQuantity) {
+          changed = true;
+          return {
+            ...item,
+            quantity: newQty,
+            total: roundMoney(newQty * item.unit_price),
+            maxQuantity: available,
+          };
+        }
+        return item;
+      });
+      return changed ? next : prevCart;
+    });
+  }, [products]);
 
   const loadData = async () => {
     setLoading(true);
@@ -1029,15 +1321,24 @@ const Sales = () => {
     setLoading(false);
   };
 
-  // Keyboard shortcuts - use refs to avoid listener accumulation
-  const shortcutStateRef = useRef({ cartLength: 0, showPaymentModal: false, showShortcutsHelp: false });
+  // Keyboard shortcuts - use refs to avoid listener accumulation.
+  // Track ALL modal-state flags so F-keys don't fire underneath an open dialog
+  // (previously postSaleChooser + docModal were missed, letting F8/F9 punch through).
+  const shortcutStateRef = useRef({
+    cartLength: 0, showPaymentModal: false, showShortcutsHelp: false,
+    showPostSaleChooser: false, showDocModal: false,
+  });
   useEffect(() => {
-    shortcutStateRef.current = { cartLength: cart.length, showPaymentModal, showShortcutsHelp };
-  }, [cart.length, showPaymentModal, showShortcutsHelp]);
+    shortcutStateRef.current = {
+      cartLength: cart.length,
+      showPaymentModal, showShortcutsHelp, showPostSaleChooser, showDocModal,
+    };
+  }, [cart.length, showPaymentModal, showShortcutsHelp, showPostSaleChooser, showDocModal]);
 
   useEffect(() => {
     const handleKeyDown = (e) => {
-      const { cartLength, showPaymentModal: payModal, showShortcutsHelp: helpModal } = shortcutStateRef.current;
+      const s = shortcutStateRef.current;
+      const anyModal = s.showPaymentModal || s.showShortcutsHelp || s.showPostSaleChooser || s.showDocModal;
 
       // Always allow typing in form fields
       const isFormElement = ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName);
@@ -1048,14 +1349,17 @@ const Sales = () => {
         return;
       }
 
-      // Don't process shortcuts if modal is open
-      if (payModal || helpModal) {
+      // Don't process shortcuts while ANY modal is open — Escape is the modal's job
+      if (anyModal) {
         if (e.key === 'Escape') {
           setShowPaymentModal(false);
           setShowShortcutsHelp(false);
+          setShowPostSaleChooser(false);
+          setShowDocModal(false);
         }
         return;
       }
+      const cartLength = s.cartLength;
 
       switch (e.key) {
         case 'F1':
@@ -1097,78 +1401,222 @@ const Sales = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []); // Register ONCE - no stale listener accumulation
 
-  // Auto-focus barcode input
-  useEffect(() => {
-    if (!loading && barcodeInputRef.current) {
-      barcodeInputRef.current.focus();
-    }
-  }, [loading]);
+  // Return focus to the barcode input — called after scans, modal close, and idle detection.
+  // Skips if the user is actively typing into another form field (detected via the suspend flag).
+  const refocusBarcode = useCallback(() => {
+    if (suspendAutoFocusRef.current) return;
+    const el = barcodeInputRef.current;
+    if (!el || document.activeElement === el) return;
+    const active = document.activeElement;
+    const isTypingElsewhere = active && ['INPUT', 'TEXTAREA', 'SELECT'].includes(active.tagName)
+      && active !== el && active.type !== 'button';
+    if (isTypingElsewhere) return;
+    el.focus();
+  }, []);
 
-  // Handle barcode scan
-  const handleBarcodeScan = useCallback(async (barcode) => {
-    if (!barcode.trim()) return;
+  // Auto-focus on load AND whenever focus ends up nowhere (document.body receives focus after
+  // clicks on non-interactive areas, modal closes, etc.). This is the key fix for "scanner
+  // keystrokes vanish after I click something" — a USB scanner that emits keyboard events
+  // needs an input to receive them, so we keep the barcode field focused by default.
+  useEffect(() => {
+    if (!loading) refocusBarcode();
+  }, [loading, refocusBarcode]);
+
+  useEffect(() => {
+    const onFocusIn = (e) => {
+      // Fires when any element gains focus. If focus lands on the body (i.e., nothing
+      // focused — typical after modal close or clicking empty space), pull it back.
+      if (e.target === document.body) refocusBarcode();
+    };
+    // When focus LEAVES the barcode input for body within the same tick, still refocus
+    // (some transitions go input→body→input, we want to land back on the barcode).
+    const onFocusOut = (e) => {
+      if (e.target === barcodeInputRef.current) {
+        setTimeout(() => {
+          if (document.activeElement === document.body) refocusBarcode();
+        }, 0);
+      }
+    };
+    // Click anywhere: if the click landed on a non-input (button, icon, empty space),
+    // the browser may leave focus on that button and our focusin handler won't fire
+    // (target isn't body). Snap focus back so the next scanner keystroke reaches the
+    // barcode input. Input/textarea clicks are respected — the user wants to type.
+    const onMouseUp = () => {
+      setTimeout(() => {
+        const a = document.activeElement;
+        if (!a || a === document.body) { refocusBarcode(); return; }
+        if (a === barcodeInputRef.current) return;
+        const tag = a.tagName;
+        const isInteractiveInput = tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || a.isContentEditable;
+        if (!isInteractiveInput) refocusBarcode();
+      }, 0);
+    };
+    document.addEventListener('focusin', onFocusIn);
+    document.addEventListener('focusout', onFocusOut);
+    document.addEventListener('mouseup', onMouseUp);
+    return () => {
+      document.removeEventListener('focusin', onFocusIn);
+      document.removeEventListener('focusout', onFocusOut);
+      document.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [refocusBarcode]);
+
+  // Pause auto-refocus while any modal is open, or while the user is on the History
+  // tab (the scanner input is unmounted there — attempting to focus it is a no-op
+  // that we may as well skip). Resume + refocus on close / tab-back.
+  useEffect(() => {
+    const anyModalOpen = showPaymentModal || showShortcutsHelp || showPostSaleChooser || showDocModal;
+    const notPosTab = activeTab !== 'pos';
+    suspendAutoFocusRef.current = anyModalOpen || notPosTab;
+    if (!anyModalOpen && !notPosTab && !loading) {
+      // Small delay so the closing modal's unmount / tab switch completes before we yank focus.
+      // `timerId` (not `t`) — avoid shadowing the `t` translator from useLanguage.
+      const timerId = setTimeout(refocusBarcode, 50);
+      return () => clearTimeout(timerId);
+    }
+  }, [showPaymentModal, showShortcutsHelp, showPostSaleChooser, showDocModal, activeTab, loading, refocusBarcode]);
+
+  // Handle a completed barcode scan. Called from Enter/Tab/LF/CR terminator.
+  //
+  // Concurrency: we no longer DROP overlapping scans. Instead, each scan runs
+  // independently and the trailing input-clear only fires if the field still
+  // contains the code we just processed. This means a fast cashier scanning
+  // A then B 30ms apart gets BOTH items in the cart — the old inflight-drop
+  // behavior silently lost the second item.
+  const handleBarcodeScan = useCallback(async (rawBarcode) => {
+    const barcode = (rawBarcode || '').replace(/[\r\n\t]/g, '').trim();
+    if (!barcode) {
+      setBarcodeInput('');
+      return;
+    }
+
+    // Dedupe: ignore the same code scanned within 200ms of the previous one.
+    // Scanner terminator-repeat bugs and Enter-mashing fire in <50ms; a human
+    // intentionally rescanning for quantity has a ≥300ms physical gap.
+    const now = Date.now();
+    if (lastScanRef.current.code === barcode && now - lastScanRef.current.at < 200) {
+      return;
+    }
+    lastScanRef.current = { code: barcode, at: now };
+
+    // Smart clear: only wipe the input if it still holds exactly this code.
+    // If the user (or a fast scanner) has started typing a NEW code while we
+    // were awaiting, leave their in-progress characters alone.
+    const smartClear = () => {
+      setBarcodeInput(current => {
+        const normalized = (current || '').replace(/[\r\n\t]/g, '').trim();
+        return normalized === barcode ? '' : current;
+      });
+    };
 
     try {
-      const result = await window.api.products.getByBarcode(barcode.trim());
+      // Exact-then-zero-normalized lookup happens in main process (one IPC).
+      const result = await window.api.products.getByBarcode(barcode);
+      let product = null;
+      let matchSource = 'barcode'; // 'barcode' | 'name' | 'barcode-fuzzy'
+
       if (result.success && result.data) {
-        addToCart(result.data);
-        showNotification(`${result.data.name} ${t('addedToCart')}`);
+        product = result.data;
       } else {
-        // Try searching by name/code
-        const searchResult = await window.api.products.search(barcode.trim());
-        if (searchResult.success && searchResult.data.length === 1) {
-          addToCart(searchResult.data[0]);
-          showNotification(`${searchResult.data[0].name} ${t('addedToCart')}`);
-        } else if (searchResult.data.length > 1) {
-          setSearchQuery(barcode.trim());
-          showNotification(t('multipleProductsFound'), 'info');
-        } else {
-          showNotification(t('productNotFound'), 'error');
+        // No barcode hit → fall back to name/description search. Only auto-add
+        // if exactly one match; ambiguous matches open the search panel.
+        const searchResult = await window.api.products.search(barcode);
+        if (searchResult.success && Array.isArray(searchResult.data)) {
+          if (searchResult.data.length === 1) {
+            product = searchResult.data[0];
+            // Distinguish "barcode substring hit via LIKE" from "name hit" — the
+            // former means admin typo/padding rather than a real name match.
+            matchSource = (product.barcode && product.barcode.includes(barcode))
+              ? 'barcode-fuzzy'
+              : 'name';
+          } else if (searchResult.data.length > 1) {
+            setSearchQuery(barcode);
+            showNotification(t('multipleProductsFound'), 'info');
+            smartClear();
+            refocusBarcode();
+            return;
+          }
         }
+      }
+
+      if (!product) {
+        showNotification(t('productNotFound'), 'error');
+        smartClear();
+        refocusBarcode();
+        return;
+      }
+
+      const outcome = addToCart(product);
+      if (outcome === 'out_of_stock') {
+        showNotification(`${product.name}: ${t('outOfStock')}`, 'warning');
+      } else if (outcome === 'max_reached') {
+        showNotification(`${product.name}: ${t('maxQuantityReached')}`, 'warning');
+      } else {
+        const prefix = matchSource === 'name' ? '(name) '
+          : matchSource === 'barcode-fuzzy' ? '(~) '
+          : '';
+        showNotification(`${prefix}${product.name} ${t('addedToCart')}`);
       }
     } catch (error) {
       console.error('Barcode scan error:', error);
       showNotification(t('scanError'), 'error');
     }
 
-    setBarcodeInput('');
-  }, [t]);
+    smartClear();
+    refocusBarcode();
+  }, [t, showNotification, refocusBarcode]);
 
-  // Add product to cart
+  // Add product to cart. Returns 'added' | 'out_of_stock' | 'max_reached'.
+  //
+  // Correctness note: the max-reached guard MUST live inside the setCart updater so
+  // it reads prevCart (the freshest state React has), not a stale `cart` closure.
+  // Without this, two common races would let the cart over-allocate stock:
+  //   (a) Stale-closure handleBarcodeScan captures an earlier render's `cart`.
+  //   (b) The [products]-reconciler effect clamps a quantity in the same React batch
+  //       as a scan — reading `cart` from outer scope sees the pre-reconcile cart.
+  // The `outcome` mutation across the updater is idempotent (deterministic from
+  // prevCart), so Strict Mode's double-invocation produces the same answer twice.
   const addToCart = (product) => {
     const availableQty = product.quantity || 0;
-    if (availableQty <= 0) return; // Out of stock
+    if (availableQty <= 0) return 'out_of_stock';
 
+    let outcome = 'added';
     setCart(prevCart => {
-      const existingIndex = prevCart.findIndex(item => item.product_id === product.id);
-
-      if (existingIndex >= 0) {
-        // Check if we can add more
-        const currentInCart = prevCart[existingIndex].quantity;
-        if (currentInCart >= availableQty) return prevCart; // Can't add more
-
-        // Increase quantity
+      const idx = prevCart.findIndex(item => item.product_id === product.id);
+      if (idx >= 0) {
+        const current = prevCart[idx].quantity;
+        if (current >= availableQty) {
+          outcome = 'max_reached';
+          return prevCart;
+        }
         const updated = [...prevCart];
-        updated[existingIndex] = {
-          ...updated[existingIndex],
-          quantity: updated[existingIndex].quantity + 1,
-          total: (updated[existingIndex].quantity + 1) * updated[existingIndex].unit_price,
-          maxQuantity: availableQty
+        const newQty = Math.min(current + 1, availableQty);
+        updated[idx] = {
+          ...updated[idx],
+          quantity: newQty,
+          total: roundMoney(newQty * updated[idx].unit_price),
+          maxQuantity: availableQty,
         };
+        outcome = 'added';
         return updated;
       }
-
-      // Add new item
+      outcome = 'added';
       return [...prevCart, {
-        id: Date.now(), // Temporary ID for UI
+        // Include a random suffix so two adds in the same millisecond (fast scanner
+        // or automated test) don't collide on React's key — Date.now() alone can repeat.
+        id: Date.now() + Math.random(),
         product_id: product.id,
         name: product.name,
         unit_price: product.selling_price,
         quantity: 1,
-        total: product.selling_price,
-        maxQuantity: availableQty
+        total: roundMoney(product.selling_price),
+        maxQuantity: availableQty,
       }];
     });
+    // Keep scanner input focused after any add (click or scan) so the next scan
+    // never lands on a <button> whose focus was just stolen by the browser.
+    refocusBarcode();
+    return outcome;
   };
 
   // Update cart item quantity
@@ -1180,13 +1628,12 @@ const Sales = () => {
 
     setCart(prevCart => prevCart.map(item => {
       if (item.id === itemId) {
-        // Check max quantity available
         const maxQty = item.maxQuantity || Infinity;
         const finalQuantity = Math.min(newQuantity, maxQty);
         return {
           ...item,
           quantity: finalQuantity,
-          total: finalQuantity * item.unit_price
+          total: roundMoney(finalQuantity * item.unit_price)
         };
       }
       return item;
@@ -1214,96 +1661,113 @@ const Sales = () => {
     }
   };
 
-  // Calculate totals
-  const subtotal = cart.reduce((sum, item) => sum + item.total, 0);
+  // Calculate totals (rounded at every accumulation step to avoid float drift)
+  const subtotal = roundMoney(cart.reduce((sum, item) => sum + roundMoney(item.total), 0));
   const discount = 0; // Can be extended
-  const total = subtotal - discount;
+  const total = roundMoney(subtotal - discount);
 
-  // Filter products
-  const filteredProducts = products.filter(product => {
-    const matchesSearch = product.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (product.barcode && product.barcode.includes(searchQuery)) ||
-      (product.description && product.description.toLowerCase().includes(searchQuery.toLowerCase()));
+  // Filter + rank products. Diacritic-insensitive, case-insensitive, multi-token.
+  // Active products only (a deactivated product shouldn't be sellable through POS).
+  // Favorites filter is applied before ranking so the result order is stable.
+  const filteredProducts = useMemo(() => {
+    const pool = products.filter(p => p.is_active && (!showFavoritesOnly || p.is_favorite));
+    return rankProducts(pool, searchQuery);
+  }, [products, searchQuery, showFavoritesOnly]);
 
-    const matchesFavorite = !showFavoritesOnly || product.is_favorite;
+  // Reset the keyboard cursor whenever the result set changes so "Enter to add"
+  // always targets the top-ranked current result, not a stale index.
+  useEffect(() => {
+    setHighlightedIdx(0);
+  }, [searchQuery, showFavoritesOnly]);
 
-    return matchesSearch && matchesFavorite;
-  });
+  // Keep the cursor in bounds (e.g., if products list shrinks due to sync pull).
+  useEffect(() => {
+    if (highlightedIdx >= filteredProducts.length && filteredProducts.length > 0) {
+      setHighlightedIdx(0);
+    }
+  }, [filteredProducts.length, highlightedIdx]);
+
+  // Scroll the keyboard-highlighted card into view as the cursor moves.
+  // Uses 'nearest' so hitting ArrowDown past the fold just nudges the viewport.
+  useEffect(() => {
+    if (searchQuery && highlightedCardRef.current) {
+      highlightedCardRef.current.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }, [highlightedIdx, searchQuery]);
 
   // Get products in cart
   const cartProductIds = cart.map(item => item.product_id);
 
-  // Complete sale
+  // Complete sale — single atomic IPC (header + items + stock + balance in one transaction)
   const completeSale = async (paymentData) => {
     setIsProcessing(true);
 
+    // Snapshot client up-front so post-sale document flow has the right name even
+    // if setSelectedClient(null) has fired by the time the doc chooser opens.
+    const clientSnapshot = selectedClient;
+
     try {
-      // Create sale
       const saleData = {
         client_id: selectedClient?.id || null,
         date: new Date().toISOString().split('T')[0],
-        subtotal: subtotal,
-        discount: discount,
-        total: total,
-        paid_amount: paymentData.paidAmount,
+        subtotal: roundMoney(subtotal),
+        discount: roundMoney(discount),
+        total: roundMoney(total),
+        paid_amount: roundMoney(paymentData.paidAmount),
         status: paymentData.status,
-        notes: paymentData.notes
+        notes: paymentData.notes,
+        items: cart.map(item => ({
+          product_id: item.product_id,
+          quantity: item.quantity,
+          unit_price: roundMoney(item.unit_price),
+          total: roundMoney(item.total),
+        })),
       };
 
-      const saleResult = await window.api.sales.add(saleData);
+      const saleResult = await window.api.sales.createComplete(saleData);
 
-      if (!saleResult.success) {
-        throw new Error(saleResult.error || 'Failed to create sale');
+      if (!saleResult || !saleResult.success) {
+        throw new Error((saleResult && saleResult.error) || 'Failed to create sale');
       }
 
       const saleId = saleResult.data.lastInsertRowid;
 
-      // Add sale items - check each result, rollback on failure
-      for (const item of cart) {
-        const itemResult = await window.api.sales.addItem({
-          sale_id: saleId,
-          product_id: item.product_id,
-          quantity: item.quantity,
-          unit_price: item.unit_price,
-          total: item.total
-        });
-        if (!itemResult.success) {
-          // Rollback: delete the partially created sale
-          await window.api.sales.delete(saleId);
-          throw new Error(itemResult.error || `Failed to add item: ${item.product_id}`);
-        }
-      }
-
-      // Get full sale data for document generation
-      const fullSaleResult = await window.api.sales.getById(saleId);
-      const saleItems = await window.api.sales.getItems(saleId);
-
-      const completedSale = {
-        ...fullSaleResult.data,
-        items: saleItems.data,
-        client: selectedClient
-      };
-
-      setLastSale(completedSale);
-
-      // Reset cart
+      // The sale is already committed atomically in the DB. Reset the cart NOW so
+      // the cashier can start the next sale immediately. Document-generation is a
+      // cosmetic follow-up — any failure loading the sale back must not make the
+      // cashier think the real sale failed.
       setCart([]);
       setSelectedClient(null);
       setShowPaymentModal(false);
-
       showNotification(t('saleCompleted'));
 
-      // Offer to generate document — open chooser modal instead of window.confirm
-      setTimeout(() => {
-        setShowPostSaleChooser(true);
-      }, 420);
+      // Best-effort fetch for the document preview; null-safe so an IPC blip here
+      // doesn't masquerade as "sale failed".
+      let completedSale = null;
+      try {
+        const fullSaleResult = await window.api.sales.getById(saleId);
+        const saleItems = await window.api.sales.getItems(saleId);
+        if (fullSaleResult && fullSaleResult.success) {
+          completedSale = {
+            ...(fullSaleResult.data || {}),
+            items: (saleItems && saleItems.data) || [],
+            client: clientSnapshot,
+          };
+        }
+      } catch (docErr) {
+        console.error('Post-sale fetch failed (sale itself was saved):', docErr);
+      }
 
+      if (completedSale) {
+        setLastSale(completedSale);
+        setTimeout(() => setShowPostSaleChooser(true), 420);
+      }
     } catch (error) {
       console.error('Sale error:', error);
       showNotification(error.message || t('saleError'), 'error');
+    } finally {
+      setIsProcessing(false);
     }
-
-    setIsProcessing(false);
   };
 
   // Loading state
@@ -1336,7 +1800,7 @@ const Sales = () => {
                 : 'bg-dark-800 text-dark-400 hover:text-white hover:bg-dark-700'}`}
           >
             <ShoppingCart size={18} />
-            {t('pos') || 'POS'}
+            {t('pos')}
           </button>
           <button
             onClick={() => setActiveTab('history')}
@@ -1346,7 +1810,7 @@ const Sales = () => {
                 : 'bg-dark-800 text-dark-400 hover:text-white hover:bg-dark-700'}`}
           >
             <History size={18} />
-            {t('salesHistory') || 'Sales History'}
+            {t('salesHistory')}
           </button>
         </div>
       </div>
@@ -1363,17 +1827,38 @@ const Sales = () => {
           {/* Header */}
           <div className="p-4 border-b border-dark-700/50 bg-dark-800/50">
             <div className="flex items-center gap-4 mb-4">
-              {/* Barcode Scanner */}
+              {/* Barcode Scanner
+                  - Accepts Enter, Tab, LF, CR as scan terminators (USB scanners vary).
+                  - onChange strips any LF/CR that arrived as text (some scanners emit them as chars)
+                    and auto-fires the scan so no keyDown is needed. */}
               <div className="flex-1 relative">
                 <Barcode className="absolute left-4 top-1/2 -translate-y-1/2 text-emerald-400" size={20} />
                 <input
                   ref={barcodeInputRef}
                   type="text"
+                  autoComplete="off"
+                  spellCheck={false}
+                  aria-label={t('scanBarcode')}
                   value={barcodeInput}
-                  onChange={(e) => setBarcodeInput(e.target.value)}
+                  onChange={(e) => {
+                    const raw = e.target.value;
+                    if (/[\r\n]/.test(raw)) {
+                      // Scanner injected a line-feed as text — treat as terminator
+                      const clean = raw.replace(/[\r\n]/g, '');
+                      setBarcodeInput('');
+                      handleBarcodeScan(clean);
+                    } else {
+                      setBarcodeInput(raw);
+                    }
+                  }}
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') {
-                      handleBarcodeScan(barcodeInput);
+                    if (e.key === 'Enter' || e.key === 'Tab') {
+                      // Stop Tab from escaping to the next element mid-scan.
+                      // Read the live DOM value — React state can lag one render behind
+                      // when a fast scanner fires Enter before the last setBarcodeInput settles,
+                      // and the stale state would send a truncated barcode to the server.
+                      e.preventDefault();
+                      handleBarcodeScan(e.currentTarget.value);
                     }
                   }}
                   placeholder={t('scanBarcode')}
@@ -1386,21 +1871,75 @@ const Sales = () => {
                 </span>
               </div>
 
-              {/* Product Search */}
+              {/* Product Search — diacritic-insensitive, ranked, keyboard-navigable */}
               <div className="w-80 relative">
                 <Search className="absolute left-4 top-1/2 -translate-y-1/2 text-dark-400" size={20} />
                 <input
                   ref={searchInputRef}
                   type="text"
+                  autoComplete="off"
+                  spellCheck={false}
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    // Arrow nav inside results; Enter adds the highlighted product; Esc clears
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      if (filteredProducts.length > 0) {
+                        setHighlightedIdx(i => (i + 1) % filteredProducts.length);
+                      }
+                    } else if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      if (filteredProducts.length > 0) {
+                        setHighlightedIdx(i => (i - 1 + filteredProducts.length) % filteredProducts.length);
+                      }
+                    } else if (e.key === 'Enter') {
+                      e.preventDefault();
+                      const pick = filteredProducts[highlightedIdx];
+                      if (pick) {
+                        const outcome = addToCart(pick);
+                        if (outcome === 'out_of_stock') {
+                          showNotification(`${pick.name}: ${t('outOfStock')}`, 'warning');
+                        } else if (outcome === 'max_reached') {
+                          showNotification(`${pick.name}: ${t('maxQuantityReached')}`, 'warning');
+                        } else {
+                          showNotification(`${pick.name} ${t('addedToCart')}`);
+                          // Clear query so cashier can start the next search immediately
+                          setSearchQuery('');
+                        }
+                      }
+                    } else if (e.key === 'Escape') {
+                      if (searchQuery) {
+                        e.preventDefault();
+                        setSearchQuery('');
+                      }
+                    }
+                  }}
                   placeholder={t('searchProducts')}
-                  className="w-full pl-12 pr-4 py-3 bg-dark-800 border border-dark-700 rounded-xl
+                  className="w-full pl-12 pr-16 py-3 bg-dark-800 border border-dark-700 rounded-xl
                            text-white placeholder-dark-400 focus:outline-none focus:border-dark-600"
                 />
-                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-dark-500">
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    onClick={() => { setSearchQuery(''); searchInputRef.current?.focus(); }}
+                    className="absolute right-10 top-1/2 -translate-y-1/2 text-dark-400 hover:text-white"
+                    aria-label={t('clear')}
+                  >
+                    <X size={16} />
+                  </button>
+                ) : null}
+                <span className="absolute right-4 top-1/2 -translate-y-1/2 text-xs text-dark-500 pointer-events-none">
                   F2
                 </span>
+                {/* Result count / no-match hint below the input */}
+                {searchQuery && (
+                  <div className="absolute left-0 right-0 top-full mt-1 text-xs text-dark-400 px-2">
+                    {filteredProducts.length === 0
+                      ? t('noProductsMatch')
+                      : `${filteredProducts.length} ${t('results')} — ${t('enterToAdd')}`}
+                  </div>
+                )}
               </div>
             </div>
 
@@ -1457,7 +1996,7 @@ const Sales = () => {
               </div>
             ) : viewMode === 'grid' ? (
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4">
-                {filteredProducts.map(product => (
+                {filteredProducts.map((product, idx) => (
                   <ProductCard
                     key={product.id}
                     product={product}
@@ -1465,20 +2004,37 @@ const Sales = () => {
                     onToggleFavorite={toggleFavorite}
                     isInCart={cartProductIds.includes(product.id)}
                     t={t}
+                    query={searchQuery}
+                    isHighlighted={!!searchQuery && idx === highlightedIdx}
+                    cardRef={idx === highlightedIdx ? highlightedCardRef : undefined}
                   />
                 ))}
               </div>
             ) : (
               <div className="space-y-2">
-                {filteredProducts.map(product => (
+                {filteredProducts.map((product, idx) => {
+                  const isOutOfStock = (product.quantity || 0) <= 0;
+                  const isHighlighted = !!searchQuery && idx === highlightedIdx;
+                  return (
                   <motion.button
                     key={product.id}
-                    whileHover={{ x: 4 }}
-                    onClick={() => addToCart(product)}
+                    ref={idx === highlightedIdx ? highlightedCardRef : undefined}
+                    whileHover={{ x: isOutOfStock ? 0 : 4 }}
+                    disabled={isOutOfStock}
+                    onClick={() => {
+                      const outcome = addToCart(product);
+                      if (outcome === 'max_reached') {
+                        showNotification(`${product.name}: ${t('maxQuantityReached')}`, 'warning');
+                      }
+                    }}
                     className={`w-full flex items-center gap-4 p-4 rounded-xl border transition-all
-                      ${cartProductIds.includes(product.id)
-                        ? 'bg-emerald-500/10 border-emerald-500/30'
-                        : 'bg-dark-800/50 border-dark-700/50 hover:border-dark-600/50'
+                      ${isOutOfStock
+                        ? 'bg-dark-800/30 border-dark-700/30 opacity-60 cursor-not-allowed'
+                        : isHighlighted
+                          ? 'bg-emerald-500/15 border-emerald-400 ring-2 ring-emerald-400/40'
+                          : cartProductIds.includes(product.id)
+                            ? 'bg-emerald-500/10 border-emerald-500/30'
+                            : 'bg-dark-800/50 border-dark-700/50 hover:border-dark-600/50'
                       }`}
                   >
                     {product.image_path ? (
@@ -1491,9 +2047,9 @@ const Sales = () => {
                       </div>
                     )}
                     <div className="flex-1 text-left">
-                      <p className="font-medium text-white">{product.name}</p>
+                      <p className="font-medium text-white"><HighlightedText text={product.name} query={searchQuery} /></p>
                       {product.barcode && (
-                        <p className="text-xs text-dark-400">{product.barcode}</p>
+                        <p className="text-xs text-dark-400"><HighlightedText text={product.barcode} query={searchQuery} /></p>
                       )}
                     </div>
                     <p className="text-lg font-bold text-emerald-400">
@@ -1513,7 +2069,8 @@ const Sales = () => {
                       )}
                     </button>
                   </motion.button>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -1646,7 +2203,10 @@ const Sales = () => {
           <PostSaleDocumentChooser
             isOpen={showPostSaleChooser && !!lastSale}
             onClose={() => {
+              // If cashier dismisses without picking a doc type, drop lastSale too —
+              // otherwise it lingers across sessions and could pre-fill stale data.
               setShowPostSaleChooser(false);
+              setLastSale(null);
             }}
             sale={lastSale}
             onSelectType={(type) => {

@@ -9,21 +9,58 @@ export const rolePermissions = {
   sales: ['dashboard', 'sales', 'stock', 'clients']
 };
 
+// Sessions older than this are discarded even if still in localStorage
+const SESSION_MAX_AGE_MS = 24 * 60 * 60 * 1000; // 24h
+
+// localStorage holds only { userId, loginAt } — never the full user record.
+// The authoritative user (role, is_active, name) is fetched from the DB on each mount
+// via auth:verifySession so a tampered localStorage can't escalate privileges.
+const STORAGE_KEY = 'session';
+
+function loadStoredSession() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.userId !== 'number' || typeof parsed.loginAt !== 'number') return null;
+    if (Date.now() - parsed.loginAt > SESSION_MAX_AGE_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export const AuthProvider = ({ children }) => {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
 
-  // Check for saved session on mount
+  // On mount: verify the stored session against the DB before trusting it
   useEffect(() => {
-    const savedUser = localStorage.getItem('user');
-    if (savedUser) {
-      try {
-        setUser(JSON.parse(savedUser));
-      } catch (e) {
-        localStorage.removeItem('user');
+    let cancelled = false;
+    (async () => {
+      // Clean up any old-format localStorage entry from prior versions
+      localStorage.removeItem('user');
+
+      const stored = loadStoredSession();
+      if (!stored) {
+        setLoading(false);
+        return;
       }
-    }
-    setLoading(false);
+      try {
+        const r = await window.api.auth.verifySession(stored.userId);
+        if (cancelled) return;
+        if (r.success) {
+          setUser(r.user);
+        } else {
+          localStorage.removeItem(STORAGE_KEY);
+        }
+      } catch {
+        localStorage.removeItem(STORAGE_KEY);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const login = async (username, password) => {
@@ -31,7 +68,10 @@ export const AuthProvider = ({ children }) => {
       const result = await window.api.auth.login(username, password);
       if (result.success) {
         setUser(result.user);
-        localStorage.setItem('user', JSON.stringify(result.user));
+        localStorage.setItem(STORAGE_KEY, JSON.stringify({
+          userId: result.user.id,
+          loginAt: Date.now(),
+        }));
         return { success: true };
       }
       return { success: false, error: result.error };
@@ -42,6 +82,7 @@ export const AuthProvider = ({ children }) => {
 
   const logout = () => {
     setUser(null);
+    localStorage.removeItem(STORAGE_KEY);
     localStorage.removeItem('user');
   };
 

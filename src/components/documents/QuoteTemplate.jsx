@@ -1,21 +1,6 @@
 import React, { forwardRef } from 'react';
+import { formatCurrency, formatDate } from '../../lib/format';
 
-const formatCurrency = (value) => {
-  return new Intl.NumberFormat('fr-DZ', {
-    style: 'decimal',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(value || 0);
-};
-
-const formatDate = (dateString) => {
-  const date = new Date(dateString);
-  return date.toLocaleDateString('fr-DZ', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric'
-  });
-};
 
 const addDays = (dateString, days) => {
   const date = new Date(dateString);

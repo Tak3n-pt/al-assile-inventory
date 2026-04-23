@@ -1,13 +1,6 @@
 import React, { forwardRef } from 'react';
+import { formatDate } from '../../lib/format';
 
-const formatDate = (dateString) => {
-  const date = new Date(dateString);
-  return date.toLocaleDateString('fr-DZ', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric'
-  });
-};
 
 const ExitVoucherTemplate = forwardRef(({ data, settings, language = 'fr' }, ref) => {
   const {

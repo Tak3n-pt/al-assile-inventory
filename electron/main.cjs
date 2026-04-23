@@ -64,6 +64,15 @@ function getImageStoragePath() {
 
 let mainWindow = null;
 
+// Broadcast a data-changed event to the renderer so open pages can auto-refresh.
+// Called after any mutating handler or sync import. Domains: 'sales' | 'clients' | 'products' | 'stock' | 'suppliers' | 'employers' | 'expenses' | 'documents' | 'settings' | 'users' | 'sync'
+function emitDataChanged(...domains) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  for (const d of domains) {
+    mainWindow.webContents.send('data-changed', d);
+  }
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -99,26 +108,35 @@ function createWindow() {
     mainWindow.webContents.focus();
   });
 
-  // Fix: Restore keyboard focus after clicking the drag region (title bar)
-  // In frameless Electron windows, clicking -webkit-app-region: drag steals
-  // keyboard focus from webContents. This periodically checks and restores it.
-  // Also handles focus loss from native dialogs (confirm/alert) that the
-  // window 'focus' event doesn't catch (internal focus loss).
-  let focusInterval = setInterval(() => {
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) {
-      mainWindow.webContents.focus();
+  // Prevent new windows from opening when React Router navigates or links clicked.
+  // By default, Electron opens a new BrowserWindow for window.open() calls.
+  // We intercept and deny, letting React Router handle navigation in place.
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    // For external URLs (http/https to other domains), open in default browser
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      const { shell } = require('electron');
+      shell.openExternal(url);
     }
-  }, 1000);
+    return { action: 'deny' };
+  });
+
+  // Prevent in-app navigation that would replace the whole webContents
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const isDevUrl = isDev && url.startsWith(`http://localhost`);
+    const isFileUrl = url.startsWith('file://');
+    if (!isDevUrl && !isFileUrl) {
+      event.preventDefault();
+    }
+  });
 
   mainWindow.on('closed', () => {
-    clearInterval(focusInterval);
     mainWindow = null;
   });
 
   if (isDev) {
     const port = process.env.VITE_PORT || 5566;
     mainWindow.loadURL(`http://localhost:${port}`);
-    mainWindow.webContents.openDevTools();
+    // DevTools disabled by default. Press F12 or Ctrl+Shift+I to open manually.
   } else {
     // In production, use app.getAppPath() to get the correct path inside asar
     const appPath = app.getAppPath();
@@ -223,6 +241,7 @@ ipcMain.handle('stock:getByCategory', (_, categoryId) => {
 ipcMain.handle('stock:add', (_, data) => {
   try {
     const result = stockDb.addStock(data);
+    emitDataChanged('stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -232,6 +251,7 @@ ipcMain.handle('stock:add', (_, data) => {
 ipcMain.handle('stock:update', (_, id, data) => {
   try {
     const result = stockDb.updateStock(id, data);
+    emitDataChanged('stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -241,6 +261,7 @@ ipcMain.handle('stock:update', (_, id, data) => {
 ipcMain.handle('stock:delete', (_, id) => {
   try {
     const result = stockDb.deleteStock(id);
+    emitDataChanged('stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -253,6 +274,7 @@ ipcMain.handle('stock:delete', (_, id) => {
 ipcMain.handle('stock:addQuantity', (_, id, quantity, unitCost, notes) => {
   try {
     const result = stockDb.addStockQuantity(id, quantity, unitCost, notes);
+    emitDataChanged('stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -262,6 +284,7 @@ ipcMain.handle('stock:addQuantity', (_, id, quantity, unitCost, notes) => {
 ipcMain.handle('stock:removeQuantity', (_, id, quantity, notes, refType, refId) => {
   try {
     const result = stockDb.removeStockQuantity(id, quantity, notes, refType, refId);
+    emitDataChanged('stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -271,6 +294,7 @@ ipcMain.handle('stock:removeQuantity', (_, id, quantity, notes, refType, refId) 
 ipcMain.handle('stock:adjustQuantity', (_, id, newQuantity, notes) => {
   try {
     const result = stockDb.adjustStockQuantity(id, newQuantity, notes);
+    emitDataChanged('stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -529,6 +553,71 @@ ipcMain.handle('suppliers:getStats', () => {
   }
 });
 
+// Supplier payment ledger — same contract as client_payments handlers.
+ipcMain.handle('suppliers:recordPayment', (_, data) => {
+  try {
+    const out = suppliersDb.recordSupplierPayment(data);
+    emitDataChanged('suppliers', 'purchases');
+    return { success: true, data: out };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('suppliers:recordVersement', (_, supplierId, amount, opts) => {
+  try {
+    const out = suppliersDb.recordSupplierVersement(supplierId, amount, opts);
+    emitDataChanged('suppliers', 'purchases');
+    return { success: true, data: out };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('suppliers:getPayments', (_, supplierId) => {
+  try {
+    return { success: true, data: suppliersDb.getSupplierPayments(supplierId) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('suppliers:deletePayment', (_, id, userId) => {
+  try {
+    const gate = requireAdmin(userId);
+    if (!gate.ok) return { success: false, error: gate.error };
+    const out = suppliersDb.deleteSupplierPayment(id);
+    emitDataChanged('suppliers', 'purchases');
+    return { success: true, data: out };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('suppliers:audit', () => {
+  try {
+    const audited = suppliersDb.auditSuppliers();
+    const drifts = audited.filter(a => a.has_drift);
+    return { success: true, data: { all: audited, drifts, total_drift_count: drifts.length } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('suppliers:repairBalance', (_, id, userId) => {
+  try {
+    const user = usersDb.getUserById(userId);
+    if (!user || user.role !== 'admin') {
+      return { success: false, error: 'Only admins can repair balances' };
+    }
+    const out = suppliersDb.repairSupplierBalance(id, userId);
+    emitDataChanged('suppliers');
+    return { success: true, data: out };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 // ============================================
 // PURCHASES
 // ============================================
@@ -676,6 +765,7 @@ ipcMain.handle('products:search', (_, query) => {
 ipcMain.handle('products:add', (_, data) => {
   try {
     const result = productsDb.addProduct(data);
+    emitDataChanged('products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -685,6 +775,7 @@ ipcMain.handle('products:add', (_, data) => {
 ipcMain.handle('products:update', (_, id, data) => {
   try {
     const result = productsDb.updateProduct(id, data);
+    emitDataChanged('products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -695,7 +786,6 @@ ipcMain.handle('products:delete', (_, id) => {
   try {
     const product = productsDb.getProductById(id);
     const result = productsDb.deleteProduct(id);
-    // Clean up image file if it exists
     if (product && product.image_path) {
       const imgDir = getImageStoragePath();
       const filePath = path.join(imgDir, product.image_path);
@@ -703,6 +793,7 @@ ipcMain.handle('products:delete', (_, id) => {
         try { fs.unlinkSync(filePath); } catch (e) { /* ignore cleanup errors */ }
       }
     }
+    emitDataChanged('products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -773,10 +864,16 @@ ipcMain.handle('products:checkStock', (_, productId, quantity) => {
   }
 });
 
+// Smart barcode lookup: exact first, then zero-normalized (handles EAN-13 padding
+// mismatches between scanners and manually entered barcodes). Returns undefined if
+// neither hits. Filters is_active so deactivated products can never be scanned.
 ipcMain.handle('products:getByBarcode', (_, barcode) => {
   try {
-    const product = productsDb.getProductByBarcode(barcode);
-    return { success: true, data: product };
+    const clean = String(barcode || '').trim();
+    if (!clean) return { success: true, data: null };
+    let product = productsDb.getProductByBarcode(clean);
+    if (!product) product = productsDb.getProductByBarcodeNormalized(clean);
+    return { success: true, data: product || null };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -811,6 +908,7 @@ ipcMain.handle('products:updateBarcode', (_, id, barcode) => {
 ipcMain.handle('products:adjustQuantity', (_, id, newQuantity, notes) => {
   try {
     const result = productsDb.adjustProductQuantity(id, newQuantity, notes);
+    emitDataChanged('products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -820,6 +918,7 @@ ipcMain.handle('products:adjustQuantity', (_, id, newQuantity, notes) => {
 ipcMain.handle('products:setInitialQuantity', (_, id, quantity, notes) => {
   try {
     const result = productsDb.setInitialQuantity(id, quantity, notes);
+    emitDataChanged('products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -829,6 +928,7 @@ ipcMain.handle('products:setInitialQuantity', (_, id, quantity, notes) => {
 ipcMain.handle('products:addResaleStock', (_, id, quantity, unitCost, notes) => {
   try {
     const result = productsDb.addResaleStock(id, quantity, unitCost, notes);
+    emitDataChanged('products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -865,12 +965,19 @@ ipcMain.handle('products:selectImage', async (_, productId) => {
   }
 });
 
+// Path-traversal-safe: require resolved path to start with imgDir + separator (defeats symlink + prefix tricks on Windows)
+function isPathWithin(parent, candidate) {
+  const p = path.normalize(parent) + path.sep;
+  const c = path.normalize(candidate);
+  return c.startsWith(p);
+}
+
 ipcMain.handle('products:deleteImage', (_, fileName) => {
   try {
     if (!fileName) return { success: true };
     const imgDir = getImageStoragePath();
     const filePath = path.resolve(imgDir, fileName);
-    if (!filePath.startsWith(imgDir)) {
+    if (!isPathWithin(imgDir, filePath)) {
       return { success: false, error: 'Invalid file path' };
     }
     if (fs.existsSync(filePath)) {
@@ -882,23 +989,23 @@ ipcMain.handle('products:deleteImage', (_, fileName) => {
   }
 });
 
-ipcMain.handle('products:getImagePath', (_, fileName) => {
+// Async read to avoid blocking the main-process event loop
+ipcMain.handle('products:getImagePath', async (_, fileName) => {
   try {
     if (!fileName) return { success: true, data: null };
     const imgDir = getImageStoragePath();
     const fullPath = path.resolve(imgDir, fileName);
-    if (!fullPath.startsWith(imgDir)) {
+    if (!isPathWithin(imgDir, fullPath)) {
       return { success: false, error: 'Invalid file path' };
     }
-    if (fs.existsSync(fullPath)) {
-      // Return as data URL so it works in both dev (http://localhost) and production (file://)
-      const ext = path.extname(fullPath).toLowerCase().replace('.', '');
-      const mimeType = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/png';
-      const imageData = fs.readFileSync(fullPath);
-      const dataUrl = `data:${mimeType};base64,${imageData.toString('base64')}`;
-      return { success: true, data: dataUrl };
+    if (!fs.existsSync(fullPath)) {
+      return { success: true, data: null };
     }
-    return { success: true, data: null };
+    const ext = path.extname(fullPath).toLowerCase().replace('.', '');
+    const mimeType = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/png';
+    const buf = await fs.promises.readFile(fullPath);
+    const dataUrl = `data:${mimeType};base64,${buf.toString('base64')}`;
+    return { success: true, data: dataUrl };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -934,6 +1041,7 @@ ipcMain.handle('batches:getByProduct', (_, productId) => {
 ipcMain.handle('batches:create', (_, data) => {
   try {
     const result = productsDb.createBatch(data);
+    emitDataChanged('products', 'stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -943,6 +1051,7 @@ ipcMain.handle('batches:create', (_, data) => {
 ipcMain.handle('batches:update', (_, id, data) => {
   try {
     const result = productsDb.updateBatch(id, data);
+    emitDataChanged('products', 'stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -952,6 +1061,7 @@ ipcMain.handle('batches:update', (_, id, data) => {
 ipcMain.handle('batches:delete', (_, id) => {
   try {
     const result = productsDb.deleteBatch(id);
+    emitDataChanged('products', 'stock');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1013,6 +1123,7 @@ ipcMain.handle('clients:getWithDebt', () => {
 ipcMain.handle('clients:add', (_, data) => {
   try {
     const result = clientsDb.addClient(data);
+    emitDataChanged('clients');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1022,16 +1133,100 @@ ipcMain.handle('clients:add', (_, data) => {
 ipcMain.handle('clients:update', (_, id, data) => {
   try {
     const result = clientsDb.updateClient(id, data);
+    emitDataChanged('clients');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('clients:updateBalance', (_, id, amount) => {
+// REMOVED: clients:updateBalance — it bypassed the ledger. Callers must use
+// clients:recordPayment (versement) or clients:adjustBalance (admin) instead.
+
+// Record a reminder contact (WhatsApp/call/in-person). Stamps the time and
+// optionally a short free-form note so the shopkeeper can tell at a glance
+// whether they already nudged this client today.
+ipcMain.handle('clients:recordContact', (_, id, note) => {
   try {
-    const result = clientsDb.updateClientBalance(id, amount);
-    return { success: true, data: result };
+    clientsDb.recordContact(id, note);
+    emitDataChanged('clients');
+    return { success: true };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Balance audit: compare each client's stored balance to the value computed
+// from their transaction history (payments - unpaid sale remainders). Returns
+// the drift list so the UI can flag discrepancies.
+ipcMain.handle('clients:audit', () => {
+  try {
+    const rows = db.prepare(`
+      SELECT
+        c.id, c.name, c.phone, c.balance AS stored_balance,
+        COALESCE((SELECT SUM(amount) FROM client_payments WHERE client_id = c.id), 0) AS sum_payments,
+        COALESCE((SELECT SUM(total - paid_amount) FROM sales
+                   WHERE client_id = c.id AND status NOT IN ('paid','cancelled')), 0) AS sum_outstanding
+      FROM clients c
+      ORDER BY c.name ASC
+    `).all();
+    const audited = rows.map(r => {
+      const expected = Math.round((r.sum_payments - r.sum_outstanding) * 100) / 100;
+      const stored   = Math.round(r.stored_balance * 100) / 100;
+      const drift    = Math.round((stored - expected) * 100) / 100;
+      return {
+        id: r.id, name: r.name, phone: r.phone,
+        stored_balance: stored, expected_balance: expected, drift,
+        has_drift: Math.abs(drift) > 0.005,
+      };
+    });
+    const drifts = audited.filter(a => a.has_drift);
+    return { success: true, data: { all: audited, drifts, total_drift_count: drifts.length } };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Admin-only balance repair with audit trail. Writes a zero-amount
+// balance_correction row to client_payments so the fix is traceable in the
+// ledger, then sets clients.balance to the computed value.
+ipcMain.handle('clients:repairBalance', (_, id, userId) => {
+  try {
+    const user = usersDb.getUserById(userId);
+    if (!user || user.role !== 'admin') {
+      return { success: false, error: 'Only admins can repair balances' };
+    }
+    const client = db.prepare('SELECT id, balance FROM clients WHERE id = ?').get(id);
+    if (!client) return { success: false, error: 'Client not found' };
+
+    const sumPayments = db.prepare(
+      'SELECT COALESCE(SUM(amount), 0) AS s FROM client_payments WHERE client_id = ?'
+    ).get(id).s;
+    const sumOutstanding = db.prepare(
+      `SELECT COALESCE(SUM(total - paid_amount), 0) AS s FROM sales
+        WHERE client_id = ? AND status NOT IN ('paid','cancelled')`
+    ).get(id).s;
+    const expected = Math.round((sumPayments - sumOutstanding) * 100) / 100;
+    const oldBalance = Math.round(client.balance * 100) / 100;
+
+    db.transaction(() => {
+      db.prepare(`
+        INSERT INTO client_payments
+          (client_id, sale_id, amount, date, method, notes, batch_id, created_by)
+        VALUES (?, NULL, 0, ?, 'balance_correction', ?, ?, ?)
+      `).run(
+        id,
+        new Date().toISOString().slice(0, 10),
+        `Balance corrected from ${oldBalance.toFixed(2)} to ${expected.toFixed(2)}`,
+        `repair-${id}-${Date.now()}`,
+        userId || null
+      );
+      db.prepare('UPDATE clients SET balance = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(expected, id);
+    })();
+
+    emitDataChanged('clients');
+    return { success: true, data: { id, old_balance: oldBalance, balance: expected } };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1040,6 +1235,7 @@ ipcMain.handle('clients:updateBalance', (_, id, amount) => {
 ipcMain.handle('clients:delete', (_, id) => {
   try {
     const result = clientsDb.deleteClient(id);
+    emitDataChanged('clients', 'sales', 'products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1049,6 +1245,88 @@ ipcMain.handle('clients:delete', (_, id) => {
 ipcMain.handle('clients:getStats', () => {
   try {
     return { success: true, data: clientsDb.getClientStats() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// CLIENT PAYMENTS (ledger: versement global + edit + delete + admin adjustment)
+// ============================================
+
+// Resolve which user is making the call from the passed-in userId.
+// Admin role is required for direct balance adjustments.
+function requireAdmin(userId) {
+  if (!userId) return { ok: false, error: 'User ID required' };
+  const user = db.prepare('SELECT role FROM users WHERE id = ? AND is_active = 1').get(userId);
+  if (!user) return { ok: false, error: 'User not found or inactive' };
+  if (user.role !== 'admin') return { ok: false, error: 'Only admins can adjust balances' };
+  return { ok: true };
+}
+
+// Versement global. FIFO allocation across unpaid sales; excess goes to credit.
+ipcMain.handle('clients:recordPayment', (_, clientId, amount, opts = {}) => {
+  try {
+    const result = clientsDb.recordClientPayment(clientId, amount, opts);
+    emitDataChanged('clients', 'sales');
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('clients:getPayments', (_, clientId) => {
+  try {
+    return { success: true, data: clientsDb.getClientPayments(clientId) };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Edit/delete guard: adjustment rows are admin-made; letting a non-admin mutate
+// them would erase the audit trail that the admin gate was supposed to protect.
+// Everyone can edit/delete their own cash/bank/return/credit_carry rows.
+function canMutatePayment(paymentId, userId) {
+  const p = db.prepare('SELECT method FROM client_payments WHERE id = ?').get(paymentId);
+  if (!p) return { ok: true }; // repo will throw "not found"
+  if (p.method === 'adjustment') {
+    const gate = requireAdmin(userId);
+    if (!gate.ok) return { ok: false, error: 'Only admins can edit or delete balance adjustments' };
+  }
+  return { ok: true };
+}
+
+ipcMain.handle('clients:updatePayment', (_, id, data, userId) => {
+  try {
+    const gate = canMutatePayment(id, userId);
+    if (!gate.ok) return { success: false, error: gate.error };
+    const result = clientsDb.updateClientPayment(id, data);
+    emitDataChanged('clients', 'sales');
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('clients:deletePayment', (_, id, userId) => {
+  try {
+    const gate = canMutatePayment(id, userId);
+    if (!gate.ok) return { success: false, error: gate.error };
+    const result = clientsDb.deleteClientPayment(id);
+    emitDataChanged('clients', 'sales');
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('clients:adjustBalance', (_, clientId, delta, reason, userId) => {
+  try {
+    const gate = requireAdmin(userId);
+    if (!gate.ok) return { success: false, error: gate.error };
+    const result = clientsDb.adjustClientBalance(clientId, delta, reason, { created_by: userId });
+    emitDataChanged('clients');
+    return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1105,9 +1383,15 @@ ipcMain.handle('sales:getUnpaid', () => {
   }
 });
 
-ipcMain.handle('sales:add', (_, data) => {
+// Atomic cart checkout: header + items + stock + balance in one transaction.
+// (Previously there was also a legacy sales:add handler that took headers only and
+//  relied on the renderer to follow up with sales:addItem calls — removed after the
+//  atomic checkout refactor so the non-atomic path cannot be resurrected by a
+//  compromised renderer.)
+ipcMain.handle('sales:createComplete', (_, saleData) => {
   try {
-    const result = clientsDb.addSale(data);
+    const result = clientsDb.addSale(saleData);
+    emitDataChanged('sales', 'clients', 'products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1117,15 +1401,20 @@ ipcMain.handle('sales:add', (_, data) => {
 ipcMain.handle('sales:update', (_, id, data) => {
   try {
     const result = clientsDb.updateSale(id, data);
+    emitDataChanged('sales', 'clients');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
   }
 });
 
-ipcMain.handle('sales:addPayment', (_, id, amount) => {
+// Pass opts so the ledger row gets created_by / date / method stamped.
+// Without this, mobile-style 24h correction-window checks (created_by === userId)
+// fail for desktop-recorded payments because the row has no author.
+ipcMain.handle('sales:addPayment', (_, id, amount, opts = {}) => {
   try {
-    const result = clientsDb.addPayment(id, amount);
+    const result = clientsDb.addPayment(id, amount, opts);
+    emitDataChanged('sales', 'clients');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1135,6 +1424,7 @@ ipcMain.handle('sales:addPayment', (_, id, amount) => {
 ipcMain.handle('sales:delete', (_, id) => {
   try {
     const result = clientsDb.deleteSale(id);
+    emitDataChanged('sales', 'clients', 'products');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1618,6 +1908,7 @@ ipcMain.handle('documents:getByDateRange', (_, startDate, endDate) => {
 ipcMain.handle('documents:create', (_, data) => {
   try {
     const result = settingsDb.createDocument(data);
+    emitDataChanged('documents', 'settings');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1627,6 +1918,7 @@ ipcMain.handle('documents:create', (_, data) => {
 ipcMain.handle('documents:delete', (_, id) => {
   try {
     const result = settingsDb.deleteDocument(id);
+    emitDataChanged('documents');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -1641,9 +1933,13 @@ ipcMain.handle('documents:getStats', () => {
   }
 });
 
+// NOTE: Document numbers are allocated atomically at creation time.
+// This preview endpoint is kept for UI hints only — never persist the value.
+// Two flows displaying a preview may show the same number; the real allocation
+// happens inside documents:create under a transaction.
 ipcMain.handle('documents:getNextNumber', (_, type) => {
   try {
-    return { success: true, data: settingsDb.getNextDocumentNumber(type) };
+    return { success: true, data: settingsDb.getNextDocumentNumber(type), preview: true };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1655,6 +1951,23 @@ ipcMain.handle('documents:getNextNumber', (_, type) => {
 ipcMain.handle('auth:login', (_, username, password) => {
   try {
     return usersDb.login(username, password);
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// Re-validate a stored user session against the DB. The renderer calls this on
+// every app launch; if the user was deleted/deactivated or their role changed
+// from under localStorage, we return the authoritative record (never password_hash).
+ipcMain.handle('auth:verifySession', (_, userId) => {
+  try {
+    if (!userId) return { success: false, error: 'No user id' };
+    const row = db.prepare(
+      'SELECT id, username, name, role, is_active FROM users WHERE id = ?'
+    ).get(userId);
+    if (!row) return { success: false, error: 'User no longer exists' };
+    if (!row.is_active) return { success: false, error: 'User is inactive' };
+    return { success: true, user: row };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1749,43 +2062,96 @@ ipcMain.handle('users:getStats', () => {
 // CLOUD SYNC
 // ============================================
 
-// Auto-sync: periodic push (every 30s) and pull (every 2min)
-let autoSyncRunning = false;
+// Auto-sync: periodic push (every 5min) and pull (every 2min)
+// Separate flags so a slow push can't block a pull and vice versa.
+let autoSyncPushing = false;
+let autoSyncPulling = false;
+
+// Hard timeout for sync HTTP calls. Without this, a dead cloud server could
+// keep a fetch hanging for Node's default (~300s) and the in-flight flag would
+// stay true the whole time, silently skipping every scheduled cycle.
+const SYNC_HTTP_TIMEOUT_MS = 30_000;
+function fetchWithTimeout(url, options = {}) {
+  const ctrl = new AbortController();
+  const to = setTimeout(() => ctrl.abort(), SYNC_HTTP_TIMEOUT_MS);
+  return fetch(url, { ...options, signal: ctrl.signal }).finally(() => clearTimeout(to));
+}
+
+// Read product images asynchronously to avoid blocking the main process event loop
+async function buildSyncPayload() {
+  const products = productsDb.getAllProducts();
+  const productsWithImages = [];
+  for (const p of products) {
+    let image_data = null;
+    if (p.image_path) {
+      try {
+        const imgDir = getImageStoragePath();
+        const fullPath = path.resolve(imgDir, p.image_path);
+        if (isPathWithin(imgDir, fullPath) && fs.existsSync(fullPath)) {
+          const ext = path.extname(fullPath).toLowerCase().replace('.', '');
+          const mime = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/png';
+          const buf = await fs.promises.readFile(fullPath);
+          image_data = `data:${mime};base64,${buf.toString('base64')}`;
+        }
+      } catch (e) {
+        console.warn('[sync] Failed to read image for product', p.id, e.message);
+      }
+    }
+    productsWithImages.push({ ...p, image_data });
+  }
+
+  const clients = clientsDb.getAllClients();
+  // Mirror the clients shape: full row list including remote_id so the mobile
+  // side can match existing mobile-origin rows by remote_id on reinsert.
+  const suppliers = db.prepare(`
+    SELECT id, name, phone, address, email, notes, balance, remote_id,
+           created_at, updated_at
+    FROM suppliers
+  `).all();
+  // Supplier payments ledger — mobile re-creates the full ledger on each push
+  // so per-supplier balance stays derivable. purchase_id is preserved only as
+  // metadata; mobile has no purchases table so this is informational.
+  const supplierPayments = db.prepare(`
+    SELECT id, supplier_id, purchase_id, amount, date, method, notes,
+           batch_id, created_by, remote_id, created_at
+    FROM supplier_payments
+  `).all();
+  // password_hash is a bcrypt hash (one-way); mobile needs it to authenticate users.
+  // Channel is authenticated via X-Sync-Key.
+  const users = db.prepare('SELECT id, username, password_hash, name, role, is_active, last_login, created_at FROM users').all();
+  const settingsObj = settingsDb.getAllSettings();
+  const settings = Object.entries(settingsObj).map(([key, value]) => ({ key, value }));
+
+  return {
+    products: productsWithImages,
+    clients,
+    suppliers,
+    supplier_payments: supplierPayments,
+    users,
+    settings
+  };
+}
 
 async function autoSyncPush() {
-  if (autoSyncRunning) return;
+  if (autoSyncPushing) return;
+  // In dev mode, auto-sync is disabled so editing the app on a dev machine
+  // can never overwrite a client's cloud data. Use the Settings → Push button
+  // for deliberate, manual sync tests, or set ALLOW_DEV_SYNC=1 to re-enable.
+  if (isDev && process.env.ALLOW_DEV_SYNC !== '1') return;
   try {
     const serverUrl = settingsDb.getSetting('cloud_server_url');
     const syncKey = settingsDb.getSetting('cloud_sync_key');
     if (!serverUrl || !syncKey) return; // Not configured
 
-    autoSyncRunning = true;
+    autoSyncPushing = true;
     console.log('[auto-sync] Pushing to cloud...');
 
-    const products = productsDb.getAllProducts();
-    const productsWithImages = products.map(p => {
-      let image_data = null;
-      if (p.image_path) {
-        const imgDir = getImageStoragePath();
-        const fullPath = path.resolve(imgDir, p.image_path);
-        if (fs.existsSync(fullPath)) {
-          const ext = path.extname(fullPath).toLowerCase().replace('.', '');
-          const mime = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/png';
-          image_data = `data:${mime};base64,${fs.readFileSync(fullPath).toString('base64')}`;
-        }
-      }
-      return { ...p, image_data };
-    });
+    const payload = await buildSyncPayload();
 
-    const clients = clientsDb.getAllClients();
-    const users = db.prepare('SELECT * FROM users').all();
-    const settingsObj = settingsDb.getAllSettings();
-    const settings = Object.entries(settingsObj).map(([key, value]) => ({ key, value }));
-
-    const response = await fetch(`${serverUrl}/api/sync/push`, {
+    const response = await fetchWithTimeout(`${serverUrl}/api/sync/push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Sync-Key': syncKey },
-      body: JSON.stringify({ products: productsWithImages, clients, users, settings })
+      body: JSON.stringify(payload)
     });
 
     const result = await response.json();
@@ -1798,103 +2164,670 @@ async function autoSyncPush() {
   } catch (err) {
     console.log('[auto-sync] Error:', err.message);
   } finally {
-    autoSyncRunning = false;
+    autoSyncPushing = false;
   }
 }
 
-// Auto-pull mobile sales
+// Import a single remote sale through the repository layer with idempotency and ID validation.
+// Returns { ok, skipped, error }
+function importRemoteSale(sale) {
+  try {
+    // Skip sales with no remote identifier — we can't dedupe them safely
+    const remoteId = sale.id != null ? String(sale.id) : (sale.uuid || sale.external_id || null);
+    if (!remoteId) {
+      return { ok: false, skipped: true, error: 'no remote id on payload' };
+    }
+
+    // ---- DELETE action: look up the local sale by remote_id and reverse it.
+    // Mirrors the mobile-side reversal: restores stock, unwinds balance,
+    // drops items + sale. If the sale was never imported locally we skip
+    // silently — nothing to do.
+    if (sale.__action === 'delete') {
+      const local = db.prepare('SELECT * FROM sales WHERE remote_id = ?').get(remoteId);
+      if (!local) return { ok: true, skipped: true };
+
+      const reverse = db.transaction(() => {
+        const items = db.prepare('SELECT product_id, quantity FROM sale_items WHERE sale_id = ?').all(local.id);
+        const restore = db.prepare(
+          `UPDATE products SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+        );
+        for (const it of items) restore.run(it.quantity, it.product_id);
+
+        if (local.client_id) {
+          if (local.total > local.paid_amount) {
+            db.prepare(`UPDATE clients SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+              .run(local.total - local.paid_amount, local.client_id);
+          } else if (local.paid_amount > local.total) {
+            db.prepare(`UPDATE clients SET balance = balance - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
+              .run(local.paid_amount - local.total, local.client_id);
+          }
+        }
+
+        // Any client_payments tied to this sale: drop them (their own delete
+        // tombstones will also arrive via the payment stream; the check in
+        // that branch handles already-gone rows).
+        db.prepare('DELETE FROM client_payments WHERE sale_id = ?').run(local.id);
+        db.prepare('DELETE FROM sale_items WHERE sale_id = ?').run(local.id);
+        db.prepare('DELETE FROM sales WHERE id = ?').run(local.id);
+      });
+      reverse();
+      return { ok: true, skipped: false };
+    }
+
+    // Translate mobile client_id → local desktop client id. Mobile-created
+    // clients now carry remote_id; desktop-origin clients share the id. If
+    // the client still can't be found, the new client row hasn't arrived in
+    // this pull batch yet — skip with "not ready" so the next pull retries.
+    let localClientId = null;
+    if (sale.client_id != null) {
+      localClientId = resolveMobileClientId(sale.client_id);
+      if (localClientId == null) {
+        return { ok: false, skipped: false, error: `client ${sale.client_id} not found locally` };
+      }
+    }
+
+    // Validate all product_ids before we touch anything
+    const items = Array.isArray(sale.items) ? sale.items : [];
+    for (const it of items) {
+      const p = db.prepare('SELECT 1 FROM products WHERE id = ?').get(it.product_id);
+      if (!p) {
+        return { ok: false, skipped: false, error: `product ${it.product_id} not found locally` };
+      }
+    }
+
+    const isReturn = sale.status === 'return' || (Number(sale.total) || 0) < 0;
+    const notes = sale.notes
+      ? '[Mobile] ' + sale.notes
+      : (isReturn ? '[Mobile Return]' : '[Mobile Sale]');
+
+    const result = clientsDb.addSale({
+      client_id: localClientId,
+      date: sale.date,
+      subtotal: sale.subtotal || sale.total,
+      discount: sale.discount || 0,
+      total: sale.total,
+      paid_amount: sale.paid_amount,
+      status: sale.status || (isReturn ? 'return' : 'pending'),
+      notes,
+      items,
+      remote_id: remoteId,
+    });
+
+    return { ok: true, skipped: !!result.skipped };
+  } catch (err) {
+    return { ok: false, skipped: false, error: err.message };
+  }
+}
+
+// Auto-pull mobile sales. Guarded so a slow network can't produce overlapping pulls
+// that would try to double-apply the same sales (UNIQUE remote_id saves us on the
+// DB side, but reaching that point twice generates noisy logs).
+// Idempotent import of a mobile-originated payment row. Uses the "mob-{mobile_id}"
+// composite key as remote_id so replays are silent no-ops. Walks the client
+// balance + the referenced sale's paid_amount/status in one transaction.
+// Resolve a mobile sale_id to the desktop's local sale id. Mobile sale IDs are
+// a separate namespace; they land in desktop.sales with remote_id = String(mobileId).
+// Returns null if the sale hasn't been pulled yet (unusual — mobile pull returns
+// sales before their payments in the same response, so this shouldn't trigger).
+function resolveMobileSaleId(mobileSaleId) {
+  if (mobileSaleId == null) return null;
+  const row = db.prepare('SELECT id FROM sales WHERE remote_id = ?').get(String(mobileSaleId));
+  return row ? row.id : null;
+}
+
+// Translate a mobile client_id to its local desktop client id via remote_id.
+// Returns the input id unchanged if no remote_id match exists (desktop-origin
+// clients have their own id and no remote_id row — the direct id works).
+function resolveMobileClientId(mobileClientId) {
+  if (mobileClientId == null) return null;
+  const byRemote = db.prepare('SELECT id FROM clients WHERE remote_id = ?').get(String(mobileClientId));
+  if (byRemote) return byRemote.id;
+  // Fall back to direct match — this is a desktop-origin client, the id is
+  // the same everywhere.
+  const direct = db.prepare('SELECT id FROM clients WHERE id = ?').get(mobileClientId);
+  return direct ? direct.id : null;
+}
+
+// Import a mobile-originated client. Idempotent via remote_id.
+//   action='create' — insert a new row (skipped if already present)
+//   action='update' — sync the latest field values, including balance (used
+//     by the mobile "Audit → Fix" flow to propagate a repaired balance back
+//     to desktop). Falls back to create if the client doesn't exist locally.
+function importRemoteClient(client) {
+  try {
+    if (!client || client.id == null) {
+      return { ok: false, skipped: true, error: 'no id on client payload' };
+    }
+    const remoteId = String(client.id);
+    const action = client.__action || 'create';
+    const existing = db.prepare('SELECT id FROM clients WHERE remote_id = ?').get(remoteId);
+
+    // ---- UPDATE: sync field values, but RECOMPUTE balance locally from
+    // desktop's own ledger. Reason: if the client has desktop-origin sales
+    // or payments that mobile doesn't know about, blindly accepting
+    // mobile's computed balance would overwrite the accurate local value.
+    // Mobile's 'update' action is treated as "re-derive this client's
+    // balance from whatever history each side has".
+    if (action === 'update' && existing) {
+      // Profile fields — take mobile's snapshot as latest.
+      db.prepare(`
+        UPDATE clients SET
+          name              = COALESCE(?, name),
+          phone             = COALESCE(?, phone),
+          address           = COALESCE(?, address),
+          email             = COALESCE(?, email),
+          notes             = COALESCE(?, notes),
+          credit_blocked    = COALESCE(?, credit_blocked),
+          last_contact_note = COALESCE(?, last_contact_note),
+          last_contact_at   = COALESCE(?, last_contact_at),
+          updated_at        = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        client.name              || null,
+        client.phone             || null,
+        client.address           || null,
+        client.email             || null,
+        client.notes             || null,
+        client.credit_blocked == null ? null : (client.credit_blocked ? 1 : 0),
+        client.last_contact_note || null,
+        client.last_contact_at   || null,
+        existing.id
+      );
+      // Balance — recompute from this side's own transaction history.
+      // This handles the case where desktop has sales/payments mobile
+      // doesn't know about without getting corrupted by mobile's snapshot.
+      const sumP = db.prepare(
+        'SELECT COALESCE(SUM(amount), 0) AS s FROM client_payments WHERE client_id = ?'
+      ).get(existing.id).s;
+      const sumO = db.prepare(
+        `SELECT COALESCE(SUM(total - paid_amount), 0) AS s FROM sales
+          WHERE client_id = ? AND status NOT IN ('paid','cancelled')`
+      ).get(existing.id).s;
+      const localExpected = Math.round((sumP - sumO) * 100) / 100;
+      db.prepare('UPDATE clients SET balance = ? WHERE id = ?')
+        .run(localExpected, existing.id);
+      return { ok: true, skipped: false, localId: existing.id };
+    }
+
+    // ---- CREATE: skip if already present (idempotency)
+    if (existing) return { ok: true, skipped: true };
+
+    // CRITICAL: insert balance=0 (not client.balance from the snapshot).
+    // The snapshot balance already reflects all payments/sales that are
+    // ALSO in this same pull. If we took the snapshot value here, the
+    // subsequent importRemotePayment/importRemoteSale calls would apply
+    // the same delta a second time → balance would be doubled.
+    //
+    // The correct model: balance is a DERIVED state. Clients always land
+    // at zero and are built up from their transaction history. Since
+    // mobile POST /api/clients hardcodes balance=0, there's no "opening
+    // balance" to preserve — every non-zero balance comes from a payment
+    // or sale that's also in the sync queue.
+    const result = db.prepare(`
+      INSERT INTO clients
+        (name, phone, address, email, notes, balance,
+         credit_blocked, last_contact_note, last_contact_at, remote_id)
+      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+    `).run(
+      client.name,
+      client.phone             || null,
+      client.address           || null,
+      client.email             || null,
+      client.notes             || null,
+      client.credit_blocked ? 1 : 0,
+      client.last_contact_note || null,
+      client.last_contact_at   || null,
+      remoteId
+    );
+    return { ok: true, skipped: false, localId: result.lastInsertRowid };
+  } catch (err) {
+    return { ok: false, skipped: false, error: err.message };
+  }
+}
+
+function importRemotePayment(payment) {
+  try {
+    const action = payment.__action || 'create';
+
+    // ---- DELETE action: find local row by remote_id and reverse it
+    if (action === 'delete') {
+      const mobileId = payment.id;
+      if (!mobileId) return { ok: false, error: 'delete missing id' };
+      const remoteId = `mob-${mobileId}`;
+      const existing = db.prepare('SELECT * FROM client_payments WHERE remote_id = ?').get(remoteId);
+      if (!existing) return { ok: true, skipped: true }; // already gone or never arrived
+
+      const tx = db.transaction(() => {
+        if (existing.sale_id) {
+          const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(existing.sale_id);
+          if (sale) {
+            const newPaid = Math.round((sale.paid_amount - existing.amount) * 100) / 100;
+            const newStatus = newPaid >= sale.total ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+            db.prepare('UPDATE sales SET paid_amount = ?, status = ? WHERE id = ?').run(Math.max(0, newPaid), newStatus, sale.id);
+          }
+        }
+        db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?').run(existing.amount, existing.client_id);
+        db.prepare('DELETE FROM client_payments WHERE id = ?').run(existing.id);
+      });
+      tx();
+      return { ok: true };
+    }
+
+    // ---- UPDATE action: adjust the existing row by the delta
+    if (action === 'update') {
+      const mobileId = payment.id;
+      if (!mobileId) return { ok: false, error: 'update missing id' };
+      const remoteId = `mob-${mobileId}`;
+      const existing = db.prepare('SELECT * FROM client_payments WHERE remote_id = ?').get(remoteId);
+      if (!existing) return { ok: false, error: 'update target not found' };
+
+      const newAmount = payment.amount;
+      const delta = Math.round((newAmount - existing.amount) * 100) / 100;
+
+      const tx = db.transaction(() => {
+        if (existing.sale_id) {
+          const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(existing.sale_id);
+          if (sale) {
+            const newPaid = Math.round((sale.paid_amount + delta) * 100) / 100;
+            const newStatus = newPaid >= sale.total ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+            db.prepare('UPDATE sales SET paid_amount = ?, status = ? WHERE id = ?').run(Math.max(0, newPaid), newStatus, sale.id);
+          }
+        }
+        db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(delta, existing.client_id);
+        db.prepare(`
+          UPDATE client_payments SET amount = ?, date = ?, notes = ? WHERE id = ?
+        `).run(newAmount, payment.date || existing.date, payment.notes !== undefined ? payment.notes : existing.notes, existing.id);
+      });
+      tx();
+      return { ok: true };
+    }
+
+    // ---- CREATE action (default)
+    const mobileId = payment.id;
+    if (!mobileId) return { ok: false, error: 'no mobile payment id' };
+    const remoteId = `mob-${mobileId}`;
+
+    // Dedupe
+    const existing = db.prepare('SELECT id FROM client_payments WHERE remote_id = ?').get(remoteId);
+    if (existing) return { ok: true, skipped: true };
+
+    if (!payment.client_id) return { ok: false, error: 'payment missing client_id' };
+    // Translate mobile client_id → local desktop client id. For desktop-origin
+    // clients, resolveMobileClientId returns the same id. For mobile-origin
+    // clients, it looks up by remote_id. Without this, the payment would bind
+    // to a completely unrelated desktop client.
+    const localClientId = resolveMobileClientId(payment.client_id);
+    if (!localClientId) {
+      return { ok: false, error: `client ${payment.client_id} not found locally` };
+    }
+
+    // Translate mobile sale_id → local desktop sale.id via remote_id lookup.
+    // Mobile sale IDs are a different namespace; looking up by raw id would
+    // point at a completely unrelated desktop sale and silently corrupt it.
+    const localSaleId = payment.sale_id != null ? resolveMobileSaleId(payment.sale_id) : null;
+
+    const tx = db.transaction(() => {
+      const res = db.prepare(`
+        INSERT INTO client_payments
+          (client_id, sale_id, amount, date, method, notes, batch_id, created_by, remote_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        localClientId,
+        localSaleId,  // null if we couldn't resolve, so the row is kept but detached
+        payment.amount,
+        payment.date,
+        payment.method || 'cash',
+        payment.notes || null,
+        payment.batch_id || null,
+        payment.created_by || null,
+        remoteId
+      );
+
+      if (localSaleId) {
+        const sale = db.prepare('SELECT * FROM sales WHERE id = ?').get(localSaleId);
+        if (sale) {
+          const newPaid = Math.round((sale.paid_amount + payment.amount) * 100) / 100;
+          const newStatus = newPaid >= sale.total ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+          db.prepare('UPDATE sales SET paid_amount = ?, status = ? WHERE id = ?').run(newPaid, newStatus, sale.id);
+        }
+      }
+
+      db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(payment.amount, localClientId);
+
+      return res.lastInsertRowid;
+    });
+
+    tx();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
+// Translate a mobile supplier_id to its local desktop supplier id via remote_id.
+// Mirrors resolveMobileClientId: returns the local id if we've already imported
+// the row (remote_id match), falls back to a direct id lookup for desktop-origin
+// suppliers (which share the id across sides), and returns null if nothing
+// matches — caller should skip the dependent operation with "not ready".
+function resolveMobileSupplierId(mobileSupplierId) {
+  if (mobileSupplierId == null) return null;
+  const byRemote = db.prepare('SELECT id FROM suppliers WHERE remote_id = ?').get(String(mobileSupplierId));
+  if (byRemote) return byRemote.id;
+  const direct = db.prepare('SELECT id FROM suppliers WHERE id = ?').get(mobileSupplierId);
+  return direct ? direct.id : null;
+}
+
+// Import a mobile-originated supplier. Idempotent via remote_id.
+//   action='create' — insert a new row (skipped if already present)
+//   action='update' — sync profile fields; balance is RECOMPUTED from local
+//     supplier_payments + purchases so desktop-only history isn't overwritten.
+//   action='delete' — drop the local mirror if present (hard delete to match
+//     schema's ON DELETE CASCADE on supplier_payments; purchases reset via
+//     ON DELETE SET NULL on purchases.supplier_id in case the column exists).
+function importRemoteSupplier(supplier) {
+  try {
+    if (!supplier || supplier.id == null) {
+      return { ok: false, skipped: true, error: 'no id on supplier payload' };
+    }
+    const remoteId = String(supplier.id);
+    const action = supplier.__action || 'create';
+    const existing = db.prepare('SELECT id FROM suppliers WHERE remote_id = ?').get(remoteId);
+
+    // ---- DELETE action: remove the local mirror. supplier_payments cascade.
+    // NOTE edge case: if there are supplier-side purchases linked locally,
+    // we preserve them (schema uses suppliers(id) as FK target; deletion
+    // policy differs from client/sales flow). Skip silently if already gone.
+    if (action === 'delete') {
+      if (!existing) return { ok: true, skipped: true };
+      const tx = db.transaction(() => {
+        db.prepare('DELETE FROM supplier_payments WHERE supplier_id = ?').run(existing.id);
+        db.prepare('DELETE FROM suppliers WHERE id = ?').run(existing.id);
+      });
+      tx();
+      return { ok: true, skipped: false };
+    }
+
+    // ---- UPDATE: sync profile fields, recompute balance from local ledger.
+    // Reason (identical to importRemoteClient): if desktop has purchases or
+    // payments mobile doesn't know about, taking mobile's snapshot balance
+    // would overwrite the accurate local value.
+    if (action === 'update' && existing) {
+      db.prepare(`
+        UPDATE suppliers SET
+          name       = COALESCE(?, name),
+          phone      = COALESCE(?, phone),
+          address    = COALESCE(?, address),
+          email      = COALESCE(?, email),
+          notes      = COALESCE(?, notes),
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(
+        supplier.name    || null,
+        supplier.phone   || null,
+        supplier.address || null,
+        supplier.email   || null,
+        supplier.notes   || null,
+        existing.id
+      );
+      // Recompute from this side's ledger. Supplier balance formula:
+      //   balance = SUM(supplier_payments.amount) - SUM(unpaid purchase remainders)
+      const sumP = db.prepare(
+        'SELECT COALESCE(SUM(amount), 0) AS s FROM supplier_payments WHERE supplier_id = ?'
+      ).get(existing.id).s;
+      const sumO = db.prepare(
+        `SELECT COALESCE(SUM(total - paid_amount), 0) AS s FROM purchases
+          WHERE supplier_id = ? AND status NOT IN ('paid','cancelled')`
+      ).get(existing.id).s;
+      const localExpected = Math.round((sumP - sumO) * 100) / 100;
+      db.prepare('UPDATE suppliers SET balance = ? WHERE id = ?')
+        .run(localExpected, existing.id);
+      return { ok: true, skipped: false, localId: existing.id };
+    }
+
+    // ---- CREATE: idempotent via remote_id
+    if (existing) return { ok: true, skipped: true };
+
+    // CRITICAL: insert balance=0 (not supplier.balance from the snapshot).
+    // Same double-counting bug that importRemoteClient fixed: supplier_payments
+    // from the same pull batch re-apply their delta via importRemoteSupplierPayment,
+    // so taking the snapshot balance here would double-count every payment.
+    // Balance is DERIVED state — let the payment import flow rebuild it.
+    const result = db.prepare(`
+      INSERT INTO suppliers
+        (name, phone, address, email, notes, balance, remote_id)
+      VALUES (?, ?, ?, ?, ?, 0, ?)
+    `).run(
+      supplier.name,
+      supplier.phone   || null,
+      supplier.address || null,
+      supplier.email   || null,
+      supplier.notes   || null,
+      remoteId
+    );
+    return { ok: true, skipped: false, localId: result.lastInsertRowid };
+  } catch (err) {
+    return { ok: false, skipped: false, error: err.message };
+  }
+}
+
+// Import a mobile-originated supplier payment. Idempotent via remote_id
+// ("sup-mob-{mobile_id}" composite key so it never collides with desktop-local
+// remote_ids from other origins). Handles create/update/delete actions.
+function importRemoteSupplierPayment(payment) {
+  try {
+    const action = payment.__action || 'create';
+
+    // ---- DELETE
+    if (action === 'delete') {
+      const mobileId = payment.id;
+      if (!mobileId) return { ok: false, error: 'delete missing id' };
+      const remoteId = `sup-mob-${mobileId}`;
+      const existing = db.prepare('SELECT * FROM supplier_payments WHERE remote_id = ?').get(remoteId);
+      if (!existing) return { ok: true, skipped: true };
+
+      const tx = db.transaction(() => {
+        if (existing.purchase_id) {
+          const purchase = db.prepare('SELECT * FROM purchases WHERE id = ?').get(existing.purchase_id);
+          if (purchase) {
+            const newPaid = Math.max(0, Math.round((purchase.paid_amount - existing.amount) * 100) / 100);
+            const newStatus = newPaid >= purchase.total ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+            db.prepare('UPDATE purchases SET paid_amount = ?, status = ? WHERE id = ?')
+              .run(newPaid, newStatus, purchase.id);
+          }
+        }
+        db.prepare('UPDATE suppliers SET balance = balance - ? WHERE id = ?')
+          .run(existing.amount, existing.supplier_id);
+        db.prepare('DELETE FROM supplier_payments WHERE id = ?').run(existing.id);
+      });
+      tx();
+      return { ok: true };
+    }
+
+    // ---- UPDATE: adjust by delta
+    if (action === 'update') {
+      const mobileId = payment.id;
+      if (!mobileId) return { ok: false, error: 'update missing id' };
+      const remoteId = `sup-mob-${mobileId}`;
+      const existing = db.prepare('SELECT * FROM supplier_payments WHERE remote_id = ?').get(remoteId);
+      if (!existing) return { ok: false, error: 'update target not found' };
+
+      const newAmount = payment.amount;
+      const delta = Math.round((newAmount - existing.amount) * 100) / 100;
+
+      const tx = db.transaction(() => {
+        if (existing.purchase_id) {
+          const purchase = db.prepare('SELECT * FROM purchases WHERE id = ?').get(existing.purchase_id);
+          if (purchase) {
+            const newPaid = Math.max(0, Math.round((purchase.paid_amount + delta) * 100) / 100);
+            const newStatus = newPaid >= purchase.total ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+            db.prepare('UPDATE purchases SET paid_amount = ?, status = ? WHERE id = ?')
+              .run(newPaid, newStatus, purchase.id);
+          }
+        }
+        db.prepare('UPDATE suppliers SET balance = balance + ? WHERE id = ?')
+          .run(delta, existing.supplier_id);
+        db.prepare(`
+          UPDATE supplier_payments SET amount = ?, date = ?, notes = ? WHERE id = ?
+        `).run(
+          newAmount,
+          payment.date || existing.date,
+          payment.notes !== undefined ? payment.notes : existing.notes,
+          existing.id
+        );
+      });
+      tx();
+      return { ok: true };
+    }
+
+    // ---- CREATE
+    const mobileId = payment.id;
+    if (!mobileId) return { ok: false, error: 'no mobile supplier_payment id' };
+    const remoteId = `sup-mob-${mobileId}`;
+
+    const existing = db.prepare('SELECT id FROM supplier_payments WHERE remote_id = ?').get(remoteId);
+    if (existing) return { ok: true, skipped: true };
+
+    if (!payment.supplier_id) return { ok: false, error: 'supplier_payment missing supplier_id' };
+    const localSupplierId = resolveMobileSupplierId(payment.supplier_id);
+    if (!localSupplierId) {
+      return { ok: false, error: `supplier ${payment.supplier_id} not found locally` };
+    }
+
+    // Mobile doesn't have purchases (they're desktop-only), so purchase_id
+    // should be null for mobile-originated payments. If somehow it's set, we
+    // ignore it — mobile has no way to reference a desktop purchase reliably.
+    const tx = db.transaction(() => {
+      const res = db.prepare(`
+        INSERT INTO supplier_payments
+          (supplier_id, purchase_id, amount, date, method, notes, batch_id, created_by, remote_id)
+        VALUES (?, NULL, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        localSupplierId,
+        payment.amount,
+        payment.date,
+        payment.method || 'cash',
+        payment.notes || null,
+        payment.batch_id || null,
+        payment.created_by || null,
+        remoteId
+      );
+      db.prepare('UPDATE suppliers SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+        .run(payment.amount, localSupplierId);
+      return res.lastInsertRowid;
+    });
+
+    tx();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err.message };
+  }
+}
+
 async function autoSyncPull() {
+  if (autoSyncPulling) return;
+  // Dev mode: block auto-pull for symmetry with push (see autoSyncPush).
+  if (isDev && process.env.ALLOW_DEV_SYNC !== '1') return;
   try {
     const serverUrl = settingsDb.getSetting('cloud_server_url');
     const syncKey = settingsDb.getSetting('cloud_sync_key');
     if (!serverUrl || !syncKey) return;
 
+    autoSyncPulling = true;
     const lastPull = settingsDb.getSetting('last_sync_pull') || '1970-01-01T00:00:00.000Z';
-    const response = await fetch(`${serverUrl}/api/sync/pull?since=${encodeURIComponent(lastPull)}`, {
+    const response = await fetchWithTimeout(`${serverUrl}/api/sync/pull?since=${encodeURIComponent(lastPull)}`, {
       headers: { 'X-Sync-Key': syncKey }
     });
     const data = await response.json();
-    if (!data.success || !data.sales || data.sales.length === 0) return;
+    if (!data.success) return;
 
-    const importSales = db.transaction(() => {
-      for (const sale of data.sales) {
-        const isReturn = sale.status === 'return' || sale.total < 0;
-        const result = db.prepare(
-          'INSERT INTO sales (client_id, date, total, paid_amount, status, notes) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(sale.client_id, sale.date, sale.total, sale.paid_amount, sale.status || 'pending',
-          sale.notes ? '[Mobile] ' + sale.notes : (isReturn ? '[Mobile Return]' : '[Mobile Sale]'));
-        const newSaleId = result.lastInsertRowid;
-        if (sale.items) {
-          for (const item of sale.items) {
-            db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)')
-              .run(newSaleId, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
-            if (isReturn) {
-              db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?').run(item.quantity, item.product_id);
-            } else {
-              db.prepare('UPDATE products SET quantity = quantity - ? WHERE id = ?').run(item.quantity, item.product_id);
-            }
-          }
-        }
-        if (isReturn && sale.client_id) {
-          db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(Math.abs(sale.total), sale.client_id);
-        } else if (!isReturn && sale.client_id && sale.total > sale.paid_amount) {
-          db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?').run(sale.total - sale.paid_amount, sale.client_id);
-        }
-      }
-    });
-    importSales();
+    const sales = data.sales || [];
+    const payments = data.payments || [];
+    const clients = data.clients || [];
+    const suppliers = data.suppliers || [];
+    const supplierPayments = data.supplier_payments || [];
+    if (sales.length === 0 && payments.length === 0 && clients.length === 0
+        && suppliers.length === 0 && supplierPayments.length === 0) return;
+
+    // Import clients FIRST — sales and payments reference client_id and the
+    // resolver needs the remote_id mapping in place before they land.
+    let impCli = 0, skpCli = 0, fldCli = 0;
+    for (const cli of clients) {
+      const r = importRemoteClient(cli);
+      if (r.ok && !r.skipped) impCli++;
+      else if (r.skipped) skpCli++;
+      else { fldCli++; console.warn('[auto-sync] Skipping client:', r.error, cli && cli.id); }
+    }
+
+    // Import suppliers BEFORE supplier_payments so the resolver has the
+    // remote_id → local id mapping before any dependent payments arrive.
+    let impSup = 0, skpSup = 0, fldSup = 0;
+    for (const sup of suppliers) {
+      const r = importRemoteSupplier(sup);
+      if (r.ok && !r.skipped) impSup++;
+      else if (r.skipped) skpSup++;
+      else { fldSup++; console.warn('[auto-sync] Skipping supplier:', r.error, sup && sup.id); }
+    }
+
+    let impSale = 0, skpSale = 0, fldSale = 0;
+    for (const sale of sales) {
+      const r = importRemoteSale(sale);
+      if (r.ok && !r.skipped) impSale++;
+      else if (r.skipped) skpSale++;
+      else { fldSale++; console.warn('[auto-sync] Skipping sale:', r.error, sale && sale.id); }
+    }
+
+    let impPay = 0, skpPay = 0, fldPay = 0;
+    for (const pay of payments) {
+      const r = importRemotePayment(pay);
+      if (r.ok && !r.skipped) impPay++;
+      else if (r.skipped) skpPay++;
+      else { fldPay++; console.warn('[auto-sync] Skipping payment:', r.error, pay && pay.id); }
+    }
+
+    let impSP = 0, skpSP = 0, fldSP = 0;
+    for (const sp of supplierPayments) {
+      const r = importRemoteSupplierPayment(sp);
+      if (r.ok && !r.skipped) impSP++;
+      else if (r.skipped) skpSP++;
+      else { fldSP++; console.warn('[auto-sync] Skipping supplier_payment:', r.error, sp && sp.id); }
+    }
+
     settingsDb.setSetting('last_sync_pull', new Date().toISOString());
-    console.log('[auto-sync] Pulled', data.sales.length, 'mobile sales');
+    console.log(`[auto-sync] Pull: clients ${impCli}/${skpCli}/${fldCli}, suppliers ${impSup}/${skpSup}/${fldSup}, sales ${impSale}/${skpSale}/${fldSale}, payments ${impPay}/${skpPay}/${fldPay}, supplier_payments ${impSP}/${skpSP}/${fldSP} (imported/skipped/failed)`);
+    if (impCli > 0 || impSale > 0 || impPay > 0 || impSup > 0 || impSP > 0) {
+      emitDataChanged('sales', 'clients', 'products', 'suppliers');
+    }
   } catch (err) {
-    // Silent fail for auto-pull
+    console.error('[auto-sync] Pull error:', err.message);
+  } finally {
+    autoSyncPulling = false;
   }
 }
 
-// Start auto-sync after DB is ready
+// Start auto-sync after DB is ready.
+// Longer intervals reduce main-process load during active POS use.
 setTimeout(() => {
-  // Push every 30 seconds
-  setInterval(() => autoSyncPush(), 30000);
-  // Pull every 2 minutes
-  setInterval(() => autoSyncPull(), 120000);
+  // Push every 5 minutes (products don't change often)
+  setInterval(() => autoSyncPush(), 5 * 60 * 1000);
+  // Pull every 2 minutes (catch mobile sales quickly)
+  setInterval(() => autoSyncPull(), 2 * 60 * 1000);
   // Initial sync on startup
   autoSyncPush();
   autoSyncPull();
-  console.log('[auto-sync] Started: push every 30s, pull every 2min');
+  console.log('[auto-sync] Started: push every 5min, pull every 2min');
 }, 10000);
 
 ipcMain.handle('sync:push', async (_, serverUrl, syncKey) => {
   try {
-    // Get all products with image data (async to avoid blocking UI)
-    const products = productsDb.getAllProducts();
-    const productsWithImages = [];
-    for (const p of products) {
-      let image_data = null;
-      if (p.image_path) {
-        const imgDir = getImageStoragePath();
-        const fullPath = path.resolve(imgDir, p.image_path);
-        if (fs.existsSync(fullPath)) {
-          const ext = path.extname(fullPath).toLowerCase().replace('.', '');
-          const mime = { jpg: 'image/jpeg', jpeg: 'image/jpeg', png: 'image/png', webp: 'image/webp' }[ext] || 'image/png';
-          const buf = await fs.promises.readFile(fullPath);
-          image_data = `data:${mime};base64,${buf.toString('base64')}`;
-        }
-      }
-      productsWithImages.push({ ...p, image_data });
-    }
+    const payload = await buildSyncPayload();
 
-    const clients = clientsDb.getAllClients();
-    const users = db.prepare('SELECT * FROM users').all();
-    const settingsObj = settingsDb.getAllSettings();
-    // Convert settings object to array format for cloud sync
-    const settings = Object.entries(settingsObj).map(([key, value]) => ({ key, value }));
-
-    const response = await fetch(`${serverUrl}/api/sync/push`, {
+    const response = await fetchWithTimeout(`${serverUrl}/api/sync/push`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Sync-Key': syncKey
       },
-      body: JSON.stringify({ products: productsWithImages, clients, users, settings })
+      body: JSON.stringify(payload)
     });
 
     const result = await response.json();
@@ -1910,63 +2843,63 @@ ipcMain.handle('sync:push', async (_, serverUrl, syncKey) => {
 ipcMain.handle('sync:pull', async (_, serverUrl, syncKey) => {
   try {
     const lastPull = settingsDb.getSetting('last_sync_pull') || '1970-01-01T00:00:00.000Z';
-    const response = await fetch(`${serverUrl}/api/sync/pull?since=${encodeURIComponent(lastPull)}`, {
+    const response = await fetchWithTimeout(`${serverUrl}/api/sync/pull?since=${encodeURIComponent(lastPull)}`, {
       headers: { 'X-Sync-Key': syncKey }
     });
 
     const data = await response.json();
     if (!data.success) return data;
 
-    let imported = 0;
-    if (data.sales && data.sales.length > 0) {
-      const importSales = db.transaction(() => {
-        for (const sale of data.sales) {
-          const isReturn = sale.status === 'return' || sale.total < 0;
-          const result = db.prepare(
-            'INSERT INTO sales (client_id, date, total, paid_amount, status, notes) VALUES (?, ?, ?, ?, ?, ?)'
-          ).run(
-            sale.client_id, sale.date, sale.total, sale.paid_amount, sale.status || 'pending',
-            sale.notes ? '[Mobile] ' + sale.notes : (isReturn ? '[Mobile Return]' : '[Mobile Sale]')
-          );
-          const newSaleId = result.lastInsertRowid;
-
-          if (sale.items) {
-            for (const item of sale.items) {
-              db.prepare(
-                'INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)'
-              ).run(newSaleId, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
-
-              if (isReturn) {
-                // Return: restore stock
-                db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?')
-                  .run(item.quantity, item.product_id);
-              } else {
-                // Normal sale: deduct stock
-                db.prepare('UPDATE products SET quantity = quantity - ? WHERE id = ?')
-                  .run(item.quantity, item.product_id);
-              }
-            }
-          }
-
-          if (isReturn && sale.client_id) {
-            // Return: reduce client debt (add back the return amount)
-            const returnAmount = Math.abs(sale.total);
-            db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?')
-              .run(returnAmount, sale.client_id);
-          } else if (!isReturn && sale.client_id && sale.total > sale.paid_amount) {
-            // Normal sale: increase client debt
-            const debt = sale.total - sale.paid_amount;
-            db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?')
-              .run(debt, sale.client_id);
-          }
-          imported++;
-        }
-      });
-      importSales();
+    // Clients / suppliers before sales & payments so the resolvers see them.
+    let impCli = 0, skpCli = 0, fldCli = 0;
+    for (const cli of data.clients || []) {
+      const r = importRemoteClient(cli);
+      if (r.ok && !r.skipped) impCli++;
+      else if (r.skipped) skpCli++;
+      else { fldCli++; console.warn('[sync:pull] Skipping client:', r.error, cli && cli.id); }
+    }
+    let impSup = 0, skpSup = 0, fldSup = 0;
+    for (const sup of data.suppliers || []) {
+      const r = importRemoteSupplier(sup);
+      if (r.ok && !r.skipped) impSup++;
+      else if (r.skipped) skpSup++;
+      else { fldSup++; console.warn('[sync:pull] Skipping supplier:', r.error, sup && sup.id); }
+    }
+    let impSale = 0, skpSale = 0, fldSale = 0;
+    for (const sale of data.sales || []) {
+      const r = importRemoteSale(sale);
+      if (r.ok && !r.skipped) impSale++;
+      else if (r.skipped) skpSale++;
+      else { fldSale++; console.warn('[sync:pull] Skipping sale:', r.error, sale && sale.id); }
+    }
+    let impPay = 0, skpPay = 0, fldPay = 0;
+    for (const pay of data.payments || []) {
+      const r = importRemotePayment(pay);
+      if (r.ok && !r.skipped) impPay++;
+      else if (r.skipped) skpPay++;
+      else { fldPay++; console.warn('[sync:pull] Skipping payment:', r.error, pay && pay.id); }
+    }
+    let impSP = 0, skpSP = 0, fldSP = 0;
+    for (const sp of data.supplier_payments || []) {
+      const r = importRemoteSupplierPayment(sp);
+      if (r.ok && !r.skipped) impSP++;
+      else if (r.skipped) skpSP++;
+      else { fldSP++; console.warn('[sync:pull] Skipping supplier_payment:', r.error, sp && sp.id); }
     }
 
     settingsDb.setSetting('last_sync_pull', new Date().toISOString());
-    return { success: true, imported };
+    if (impSale > 0 || impPay > 0 || impCli > 0 || impSup > 0 || impSP > 0) {
+      emitDataChanged('sales', 'clients', 'products', 'suppliers');
+    }
+    return {
+      success: true,
+      imported: impSale + impPay + impCli + impSup + impSP,
+      clients:           { imported: impCli,  skipped: skpCli,  failed: fldCli },
+      suppliers:         { imported: impSup,  skipped: skpSup,  failed: fldSup },
+      sales:             { imported: impSale, skipped: skpSale, failed: fldSale },
+      payments:          { imported: impPay,  skipped: skpPay,  failed: fldPay },
+      supplier_payments: { imported: impSP,   skipped: skpSP,   failed: fldSP  },
+    };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -2009,19 +2942,27 @@ ipcMain.handle('system:reset', (_, { userId, password }) => {
       'employers'
     ];
 
-    // Clear all data tables
-    for (const table of tablesToClear) {
-      db.prepare(`DELETE FROM ${table}`).run();
-    }
+    // All deletes + counter resets run atomically; if any step fails, the DB is untouched
+    const doReset = db.transaction(() => {
+      for (const table of tablesToClear) {
+        db.prepare(`DELETE FROM ${table}`).run();
+      }
+      for (const table of tablesToClear) {
+        db.prepare(`DELETE FROM sqlite_sequence WHERE name = ?`).run(table);
+      }
+      db.prepare(`
+        UPDATE settings SET value = '1'
+        WHERE key IN (
+          'next_invoice_number', 'next_delivery_number', 'next_proforma_number',
+          'next_purchase_order_number', 'next_exit_voucher_number',
+          'next_credit_note_number', 'next_quote_number', 'next_reception_voucher_number'
+        )
+      `).run();
+      db.prepare(`DELETE FROM settings WHERE key IN ('last_sync_push', 'last_sync_pull')`).run();
+    });
+    doReset();
 
-    // Reset auto-increment counters
-    for (const table of tablesToClear) {
-      db.prepare(`DELETE FROM sqlite_sequence WHERE name = ?`).run(table);
-    }
-
-    // Reset document numbers in settings
-    db.prepare(`UPDATE settings SET value = '1' WHERE key IN ('next_invoice_number', 'next_delivery_number', 'next_proforma_number')`).run();
-
+    emitDataChanged('sales', 'clients', 'products', 'stock', 'suppliers', 'employers', 'expenses', 'documents', 'settings');
     return { success: true, message: 'System reset successfully' };
   } catch (error) {
     return { success: false, error: error.message };

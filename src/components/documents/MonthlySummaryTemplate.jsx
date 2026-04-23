@@ -1,12 +1,6 @@
 import React, { forwardRef } from 'react';
+import { formatCurrency } from '../../lib/format';
 
-const formatCurrency = (value) => {
-  return new Intl.NumberFormat('fr-DZ', {
-    style: 'decimal',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(value || 0);
-};
 
 const MONTH_NAMES_FR = [
   'Janvier', 'Février', 'Mars', 'Avril', 'Mai', 'Juin',
