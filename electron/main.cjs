@@ -961,6 +961,23 @@ ipcMain.handle('batches:delete', (_, id) => {
 // ============================================
 // CLIENTS
 // ============================================
+ipcMain.handle('clientCategories:getAll', () => {
+  try {
+    return { success: true, data: clientsDb.getClientCategories() };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('clientCategories:add', (_, name) => {
+  try {
+    const result = clientsDb.addClientCategory(name);
+    return { success: true, data: result };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
 ipcMain.handle('clients:getAll', () => {
   try {
     return { success: true, data: clientsDb.getAllClients() };
@@ -1987,6 +2004,7 @@ ipcMain.handle('system:reset', (_, { userId, password }) => {
       'products',
       'stock',
       'clients',
+      'client_categories',
       'suppliers',
       'employers'
     ];

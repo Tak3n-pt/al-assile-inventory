@@ -161,6 +161,11 @@ contextBridge.exposeInMainWorld('api', {
   // ============================================
   // CLIENTS
   // ============================================
+  clientCategories: {
+    getAll: () => ipcRenderer.invoke('clientCategories:getAll'),
+    add: (name) => ipcRenderer.invoke('clientCategories:add', name),
+  },
+
   clients: {
     getAll: () => ipcRenderer.invoke('clients:getAll'),
     getById: (id) => ipcRenderer.invoke('clients:getById', id),

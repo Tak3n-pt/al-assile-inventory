@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   Users, Plus, Search, Filter, Edit2, Trash2, Phone, Mail, MapPin,
   ShoppingCart, DollarSign, AlertTriangle, ChevronDown, Eye, CreditCard,
-  FileText, FileCheck, FilePlus, Printer
+  FileText, FileCheck, FilePlus, Printer, Tag
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import ClientModal from '../components/ClientModal';
@@ -18,6 +18,7 @@ const Clients = () => {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const [clients, setClients] = useState([]);
+  const [clientCategories, setClientCategories] = useState([]);
   const [sales, setSales] = useState([]);
   const [products, setProducts] = useState([]);
   const [stats, setStats] = useState(null);
@@ -25,6 +26,7 @@ const Clients = () => {
   const [showDebtOnly, setShowDebtOnly] = useState(false);
   const [activeTab, setActiveTab] = useState('clients');
   const [statusFilter, setStatusFilter] = useState('all');
+  const [categoryFilter, setCategoryFilter] = useState('all');
 
   // Modal states
   const [showClientModal, setShowClientModal] = useState(false);
@@ -71,14 +73,16 @@ const Clients = () => {
 
   const loadData = async () => {
     try {
-      const [clientsRes, salesRes, productsRes, statsRes] = await Promise.all([
+      const [clientsRes, categoriesRes, salesRes, productsRes, statsRes] = await Promise.all([
         window.api.clients.getAll(),
+        window.api.clientCategories.getAll(),
         window.api.sales.getAll(),
         window.api.products.getAll(),
         window.api.clients.getStats()
       ]);
 
       if (clientsRes.success) setClients(clientsRes.data);
+      if (categoriesRes.success) setClientCategories(categoriesRes.data);
       if (salesRes.success) setSales(salesRes.data);
       if (productsRes.success) setProducts(productsRes.data);
       if (statsRes.success) setStats(statsRes.data);
@@ -198,10 +202,20 @@ const Clients = () => {
   const filteredClients = clients.filter(client => {
     const matchesSearch = client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (client.phone && client.phone.includes(searchQuery)) ||
-      (client.email && client.email.toLowerCase().includes(searchQuery.toLowerCase()));
+      (client.email && client.email.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      (client.category_name && client.category_name.toLowerCase().includes(searchQuery.toLowerCase()));
     const matchesDebt = !showDebtOnly || client.outstanding_debt > 0 || client.balance < 0;
-    return matchesSearch && matchesDebt;
+    const matchesCategory = categoryFilter === 'all' || String(client.category_id || '') === String(categoryFilter);
+    return matchesSearch && matchesDebt && matchesCategory;
   });
+
+  const clientCategoryOptions = [
+    { value: 'all', label: t('allClientCategories') },
+    ...clientCategories.map(category => ({
+      value: category.id,
+      label: `${category.name}${category.client_count ? ` (${category.client_count})` : ''}`
+    }))
+  ];
 
   const filteredSales = sales.filter(sale => {
     const matchesSearch = sale.client_name?.toLowerCase().includes(searchQuery.toLowerCase());
@@ -339,17 +353,25 @@ const Clients = () => {
         </div>
 
         {activeTab === 'clients' ? (
-          <button
-            onClick={() => setShowDebtOnly(!showDebtOnly)}
-            className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all ${
-              showDebtOnly
-                ? 'bg-amber-500/10 border-amber-500/50 text-amber-400'
-                : 'bg-dark-800/50 border-dark-700/50 text-dark-400 hover:text-white'
-            }`}
-          >
-            <AlertTriangle size={18} />
-            {t('withDebt')}
-          </button>
+          <>
+            <CustomSelect
+              value={categoryFilter}
+              onChange={(val) => setCategoryFilter(val)}
+              options={clientCategoryOptions}
+              className="w-52"
+            />
+            <button
+              onClick={() => setShowDebtOnly(!showDebtOnly)}
+              className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all ${
+                showDebtOnly
+                  ? 'bg-amber-500/10 border-amber-500/50 text-amber-400'
+                  : 'bg-dark-800/50 border-dark-700/50 text-dark-400 hover:text-white'
+              }`}
+            >
+              <AlertTriangle size={18} />
+              {t('withDebt')}
+            </button>
+          </>
         ) : (
           <CustomSelect
             value={statusFilter}
@@ -411,6 +433,12 @@ const Clients = () => {
                           <p className="text-dark-400 text-sm">
                             {client.sale_count || 0} {t('orders')}
                           </p>
+                          {client.category_name && (
+                            <div className="mt-1 inline-flex items-center gap-1 max-w-full px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-300 text-xs">
+                              <Tag size={12} />
+                              <span className="truncate">{client.category_name}</span>
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
@@ -649,6 +677,7 @@ const Clients = () => {
         }}
         onSave={handleSaveClient}
         editItem={editingClient}
+        categories={clientCategories}
       />
 
       <SaleModal

@@ -1,12 +1,17 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, User, Save, Phone, Mail, MapPin, FileText } from 'lucide-react';
+import { X, User, Save, Phone, Mail, MapPin, FileText, Tag } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
+import CustomSelect from './CustomSelect';
 
-const ClientModal = ({ isOpen, onClose, onSave, editItem }) => {
+const NEW_CATEGORY_VALUE = '__new__';
+
+const ClientModal = ({ isOpen, onClose, onSave, editItem, categories = [] }) => {
   const { t } = useLanguage();
   const [formData, setFormData] = useState({
     name: '',
+    category_id: '',
+    new_category_name: '',
     phone: '',
     email: '',
     address: '',
@@ -20,6 +25,8 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem }) => {
     if (editItem) {
       setFormData({
         name: editItem.name || '',
+        category_id: editItem.category_id || '',
+        new_category_name: '',
         phone: editItem.phone || '',
         email: editItem.email || '',
         address: editItem.address || '',
@@ -29,6 +36,8 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem }) => {
     } else {
       setFormData({
         name: '',
+        category_id: '',
+        new_category_name: '',
         phone: '',
         email: '',
         address: '',
@@ -58,6 +67,9 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem }) => {
     if (formData.balance && isNaN(parseFloat(formData.balance))) {
       newErrors.balance = t('mustBeValidNumber');
     }
+    if (formData.category_id === NEW_CATEGORY_VALUE && !formData.new_category_name.trim()) {
+      newErrors.new_category_name = t('categoryNameRequired');
+    }
     setErrors(newErrors);
     return Object.keys(newErrors).length === 0;
   };
@@ -65,14 +77,26 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem }) => {
   const handleSubmit = (e) => {
     e.preventDefault();
     if (validate()) {
+      const createNewCategory = formData.category_id === NEW_CATEGORY_VALUE;
       onSave({
         ...formData,
+        category_id: createNewCategory ? null : formData.category_id || null,
+        new_category_name: createNewCategory ? formData.new_category_name.trim() : '',
         balance: parseFloat(formData.balance) || 0,
       });
     }
   };
 
   if (!isOpen) return null;
+
+  const categoryOptions = [
+    { value: '', label: t('noCategory') },
+    ...categories.map(category => ({
+      value: category.id,
+      label: category.name
+    })),
+    { value: NEW_CATEGORY_VALUE, label: t('createNewCategory') }
+  ];
 
   return (
     <AnimatePresence>
@@ -136,6 +160,50 @@ const ClientModal = ({ isOpen, onClose, onSave, editItem }) => {
               </div>
               {errors.name && (
                 <p className="mt-1 text-sm text-red-400">{errors.name}</p>
+              )}
+            </div>
+
+            {/* Category */}
+            <div>
+              <label className="block text-sm font-medium text-dark-300 mb-2">
+                {t('clientCategory')}
+              </label>
+              <div className="grid grid-cols-[44px_minmax(0,1fr)] gap-3">
+                <div className="h-[46px] rounded-xl bg-dark-800 border border-dark-700 flex items-center justify-center">
+                  <Tag className="w-5 h-5 text-dark-500" />
+                </div>
+                <CustomSelect
+                  value={formData.category_id}
+                  onChange={(value) => {
+                    setFormData(prev => ({
+                      ...prev,
+                      category_id: value,
+                      new_category_name: value === NEW_CATEGORY_VALUE ? prev.new_category_name : ''
+                    }));
+                    if (errors.new_category_name) {
+                      setErrors(prev => ({ ...prev, new_category_name: '' }));
+                    }
+                  }}
+                  options={categoryOptions}
+                  placeholder={t('selectClientCategory')}
+                />
+              </div>
+              {formData.category_id === NEW_CATEGORY_VALUE && (
+                <div className="mt-3">
+                  <input
+                    type="text"
+                    name="new_category_name"
+                    value={formData.new_category_name}
+                    onChange={handleChange}
+                    placeholder={t('newCategoryName')}
+                    className={`w-full px-4 py-3 rounded-xl bg-dark-800 border ${
+                      errors.new_category_name ? 'border-red-500' : 'border-dark-700'
+                    } text-white placeholder-dark-500 focus:outline-none focus:border-cyan-500 transition-colors`}
+                  />
+                  {errors.new_category_name && (
+                    <p className="mt-1 text-sm text-red-400">{errors.new_category_name}</p>
+                  )}
+                </div>
               )}
             </div>
 

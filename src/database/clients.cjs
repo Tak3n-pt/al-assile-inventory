@@ -1,6 +1,57 @@
 // Clients and Sales database operations
 
+const normalizeCategoryName = (name) => String(name || '').trim();
+
+const getOrCreateClientCategory = (db, name) => {
+  const normalized = normalizeCategoryName(name);
+  if (!normalized) return null;
+
+  const existing = db.prepare(`
+    SELECT id FROM client_categories WHERE LOWER(name) = LOWER(?)
+  `).get(normalized);
+
+  if (existing) return existing.id;
+
+  const result = db.prepare(`
+    INSERT INTO client_categories (name) VALUES (?)
+  `).run(normalized);
+
+  return result.lastInsertRowid;
+};
+
+const resolveClientCategoryId = (db, data) => {
+  if (data.new_category_name) {
+    return getOrCreateClientCategory(db, data.new_category_name);
+  }
+
+  if (data.category_id === '' || data.category_id === undefined || data.category_id === null) {
+    return null;
+  }
+
+  return Number(data.category_id) || null;
+};
+
 const clientsQueries = (db) => ({
+  // ============================================
+  // CLIENT CATEGORIES
+  // ============================================
+  getClientCategories: () => {
+    return db.prepare(`
+      SELECT
+        cc.*,
+        COUNT(c.id) as client_count
+      FROM client_categories cc
+      LEFT JOIN clients c ON c.category_id = cc.id
+      GROUP BY cc.id
+      ORDER BY cc.name
+    `).all();
+  },
+
+  addClientCategory: (name) => {
+    const id = getOrCreateClientCategory(db, name);
+    return db.prepare(`SELECT * FROM client_categories WHERE id = ?`).get(id);
+  },
+
   // ============================================
   // CLIENTS
   // ============================================
@@ -8,10 +59,12 @@ const clientsQueries = (db) => ({
     return db.prepare(`
       SELECT
         c.*,
+        cc.name as category_name,
         (SELECT COUNT(*) FROM sales WHERE client_id = c.id) as sale_count,
         (SELECT COALESCE(SUM(total), 0) FROM sales WHERE client_id = c.id) as total_purchases,
         (SELECT COALESCE(SUM(total - paid_amount), 0) FROM sales WHERE client_id = c.id AND status != 'paid') as outstanding_debt
       FROM clients c
+      LEFT JOIN client_categories cc ON c.category_id = cc.id
       ORDER BY c.name
     `).all();
   },
@@ -20,10 +73,12 @@ const clientsQueries = (db) => ({
     return db.prepare(`
       SELECT
         c.*,
+        cc.name as category_name,
         (SELECT COUNT(*) FROM sales WHERE client_id = c.id) as sale_count,
         (SELECT COALESCE(SUM(total), 0) FROM sales WHERE client_id = c.id) as total_purchases,
         (SELECT COALESCE(SUM(total - paid_amount), 0) FROM sales WHERE client_id = c.id AND status != 'paid') as outstanding_debt
       FROM clients c
+      LEFT JOIN client_categories cc ON c.category_id = cc.id
       WHERE c.id = ?
     `).get(id);
   },
@@ -32,21 +87,25 @@ const clientsQueries = (db) => ({
     return db.prepare(`
       SELECT
         c.*,
+        cc.name as category_name,
         (SELECT COUNT(*) FROM sales WHERE client_id = c.id) as sale_count,
         (SELECT COALESCE(SUM(total - paid_amount), 0) FROM sales WHERE client_id = c.id AND status != 'paid') as outstanding_debt
       FROM clients c
-      WHERE c.name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR c.address LIKE ?
+      LEFT JOIN client_categories cc ON c.category_id = cc.id
+      WHERE c.name LIKE ? OR c.phone LIKE ? OR c.email LIKE ? OR c.address LIKE ? OR cc.name LIKE ?
       ORDER BY c.name
-    `).all(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
+    `).all(`%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`, `%${query}%`);
   },
 
   getClientsWithDebt: () => {
     return db.prepare(`
       SELECT
         c.*,
+        cc.name as category_name,
         (SELECT COUNT(*) FROM sales WHERE client_id = c.id) as sale_count,
         (SELECT COALESCE(SUM(total - paid_amount), 0) FROM sales WHERE client_id = c.id AND status != 'paid') as outstanding_debt
       FROM clients c
+      LEFT JOIN client_categories cc ON c.category_id = cc.id
       WHERE c.balance < 0 OR EXISTS (
         SELECT 1 FROM sales WHERE client_id = c.id AND status != 'paid'
       )
@@ -55,11 +114,13 @@ const clientsQueries = (db) => ({
   },
 
   addClient: (data) => {
+    const categoryId = resolveClientCategoryId(db, data);
     return db.prepare(`
-      INSERT INTO clients (name, phone, address, email, notes, balance)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO clients (name, category_id, phone, address, email, notes, balance)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       data.name,
+      categoryId,
       data.phone || null,
       data.address || null,
       data.email || null,
@@ -69,17 +130,21 @@ const clientsQueries = (db) => ({
   },
 
   updateClient: (id, data) => {
+    const categoryId = resolveClientCategoryId(db, data);
     return db.prepare(`
       UPDATE clients SET
         name = ?,
+        category_id = ?,
         phone = ?,
         address = ?,
         email = ?,
         notes = ?,
-        balance = ?
+        balance = ?,
+        updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
       data.name,
+      categoryId,
       data.phone || null,
       data.address || null,
       data.email || null,

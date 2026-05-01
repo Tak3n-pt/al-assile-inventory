@@ -263,18 +263,33 @@ const initDatabase = (db) => {
   // CLIENTS
   // ============================================
   db.exec(`
+    CREATE TABLE IF NOT EXISTS client_categories (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.exec(`
     CREATE TABLE IF NOT EXISTS clients (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
+      category_id INTEGER,
       phone TEXT,
       address TEXT,
       email TEXT,
       notes TEXT,
       balance REAL DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (category_id) REFERENCES client_categories(id)
     )
   `);
+
+  // Migration: Add category_id to existing client databases
+  if (!columnExists('clients', 'category_id')) {
+    db.exec(`ALTER TABLE clients ADD COLUMN category_id INTEGER REFERENCES client_categories(id)`);
+  }
 
   // ============================================
   // SALES
