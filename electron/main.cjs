@@ -64,9 +64,34 @@ function getImageStoragePath() {
 
 let mainWindow = null;
 
+// Domains that are mirrored to the cloud; a change here triggers a debounced
+// push so mobile clients see edits within seconds rather than waiting up to
+// 5 min for the next interval. 'employers', 'expenses', 'documents' are
+// desktop-only and don't trigger sync.
+const SYNC_RELEVANT_DOMAINS = new Set([
+  'sales', 'clients', 'products', 'suppliers', 'stock', 'settings', 'users'
+]);
+
+let pushDebounceTimer = null;
+function schedulePush() {
+  if (pushDebounceTimer) clearTimeout(pushDebounceTimer);
+  // 1500ms collapses bursts (POS adding 5 items) into a single push without
+  // making the user wait noticeably for their write to appear on mobile.
+  pushDebounceTimer = setTimeout(() => {
+    pushDebounceTimer = null;
+    autoSyncPush().catch(err => console.warn('[auto-sync] debounced push failed:', err.message));
+  }, 1500);
+}
+
 // Broadcast a data-changed event to the renderer so open pages can auto-refresh.
 // Called after any mutating handler or sync import. Domains: 'sales' | 'clients' | 'products' | 'stock' | 'suppliers' | 'employers' | 'expenses' | 'documents' | 'settings' | 'users' | 'sync'
 function emitDataChanged(...domains) {
+  // Trigger immediate push (debounced) for any sync-relevant domain. The
+  // 'sync' domain itself is excluded — pull/push completion fires it and we
+  // don't want a feedback loop.
+  if (domains.some(d => SYNC_RELEVANT_DOMAINS.has(d))) {
+    schedulePush();
+  }
   if (!mainWindow || mainWindow.isDestroyed()) return;
   for (const d of domains) {
     mainWindow.webContents.send('data-changed', d);
@@ -512,6 +537,7 @@ ipcMain.handle('suppliers:search', (_, query) => {
 ipcMain.handle('suppliers:add', (_, data) => {
   try {
     const result = suppliersDb.addSupplier(data);
+    emitDataChanged('suppliers');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -521,6 +547,7 @@ ipcMain.handle('suppliers:add', (_, data) => {
 ipcMain.handle('suppliers:update', (_, id, data) => {
   try {
     const result = suppliersDb.updateSupplier(id, data);
+    emitDataChanged('suppliers');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -530,6 +557,7 @@ ipcMain.handle('suppliers:update', (_, id, data) => {
 ipcMain.handle('suppliers:updateBalance', (_, id, amount) => {
   try {
     const result = suppliersDb.updateSupplierBalance(id, amount);
+    emitDataChanged('suppliers');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -539,6 +567,7 @@ ipcMain.handle('suppliers:updateBalance', (_, id, amount) => {
 ipcMain.handle('suppliers:delete', (_, id) => {
   try {
     const result = suppliersDb.deleteSupplier(id);
+    emitDataChanged('suppliers');
     return { success: true, data: result };
   } catch (error) {
     return { success: false, error: error.message };
@@ -587,6 +616,18 @@ ipcMain.handle('suppliers:deletePayment', (_, id, userId) => {
     const gate = requireAdmin(userId);
     if (!gate.ok) return { success: false, error: gate.error };
     const out = suppliersDb.deleteSupplierPayment(id);
+    emitDataChanged('suppliers', 'purchases');
+    return { success: true, data: out };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+ipcMain.handle('suppliers:updatePayment', (_, id, data, userId) => {
+  try {
+    const gate = requireAdmin(userId);
+    if (!gate.ok) return { success: false, error: gate.error };
+    const out = suppliersDb.updateSupplierPayment(id, data);
     emitDataChanged('suppliers', 'purchases');
     return { success: true, data: out };
   } catch (error) {
@@ -2116,6 +2157,47 @@ async function buildSyncPayload() {
            batch_id, created_by, remote_id, created_at
     FROM supplier_payments
   `).all();
+  // Desktop-origin sales. Only push sales that were CREATED on desktop
+  // (remote_id IS NULL) — a mobile-origin sale gets a numeric remote_id when
+  // desktop imports it, and pushing those back would duplicate them on mobile.
+  // No date cutoff: edits to older sales must still reach mobile, and a few
+  // thousand sale rows is negligible JSON payload for SQLite.
+  const salesRows = db.prepare(`
+    SELECT id, client_id, date, subtotal, discount, total, paid_amount,
+           status, notes, created_at
+    FROM sales
+    WHERE remote_id IS NULL
+    ORDER BY date DESC, id DESC
+  `).all();
+  const saleIds = salesRows.map(s => s.id);
+  let saleItemsRows = [];
+  let clientPaymentsRows = [];
+  if (saleIds.length > 0) {
+    const ph = saleIds.map(() => '?').join(',');
+    saleItemsRows = db.prepare(`
+      SELECT id, sale_id, product_id, quantity, unit_price, total, created_at
+      FROM sale_items
+      WHERE sale_id IN (${ph})
+    `).all(...saleIds);
+    // Only push payments that are desktop-origin (remote_id IS NULL) and that
+    // attach either to one of the pushed sales or to no sale at all (on-account).
+    // Exclude any payment with a remote_id — those came from mobile originally.
+    clientPaymentsRows = db.prepare(`
+      SELECT id, client_id, sale_id, amount, date, method, notes, batch_id,
+             created_by, created_at
+      FROM client_payments
+      WHERE remote_id IS NULL
+        AND (sale_id IS NULL OR sale_id IN (${ph}))
+    `).all(...saleIds);
+  } else {
+    clientPaymentsRows = db.prepare(`
+      SELECT id, client_id, sale_id, amount, date, method, notes, batch_id,
+             created_by, created_at
+      FROM client_payments
+      WHERE remote_id IS NULL AND sale_id IS NULL
+    `).all();
+  }
+
   // password_hash is a bcrypt hash (one-way); mobile needs it to authenticate users.
   // Channel is authenticated via X-Sync-Key.
   const users = db.prepare('SELECT id, username, password_hash, name, role, is_active, last_login, created_at FROM users').all();
@@ -2127,6 +2209,9 @@ async function buildSyncPayload() {
     clients,
     suppliers,
     supplier_payments: supplierPayments,
+    sales:      salesRows,
+    sale_items: saleItemsRows,
+    client_payments: clientPaymentsRows,
     users,
     settings
   };
@@ -2166,6 +2251,47 @@ async function autoSyncPush() {
   } finally {
     autoSyncPushing = false;
   }
+}
+
+// Stale remote_id collision detector. When the mobile DB is reset (e.g.
+// ephemeral storage wipe, manual reset), incoming ids restart from 1 and
+// collide with remote_ids we imported from a prior mobile instance. Those
+// old rows are valid history we want to keep, but the UNIQUE constraint
+// blocks the new import. This helper ONLY detects — it never mutates.
+// The caller is expected to call archiveStaleRow() inside the same
+// transaction as the subsequent INSERT, so the archive + INSERT pair is
+// atomic (a crash between them would otherwise orphan a stale row).
+//   - 'same'  → existing row matches, caller should skip (idempotent replay)
+//   - 'stale' → existing row mismatches; caller should archive + insert
+//   - 'none'  → no existing row, caller should insert
+const SYNC_STALE_TABLES = new Set(['clients', 'suppliers', 'sales', 'client_payments', 'supplier_payments']);
+function detectStaleRemoteId(table, remoteId, compareFields) {
+  if (!SYNC_STALE_TABLES.has(table)) throw new Error(`detectStaleRemoteId: unsupported table ${table}`);
+  const existing = db.prepare(`SELECT * FROM ${table} WHERE remote_id = ?`).get(remoteId);
+  if (!existing) return { state: 'none' };
+  // Skip fields whose incoming value is undefined — the payload didn't tell
+  // us, so we can't use it to disambiguate. Treating undefined as a mismatch
+  // would archive rows on every replay when the mobile side happens not to
+  // include the field.
+  const compare = Object.entries(compareFields).filter(([, v]) => v !== undefined);
+  const same = compare.every(([key, value]) => {
+    const ev = existing[key];
+    if (value == null && ev == null) return true;
+    if (value == null || ev == null) return false;
+    if (typeof value === 'number' && typeof ev === 'number') {
+      return Math.round(ev * 100) === Math.round(value * 100);
+    }
+    return String(ev) === String(value);
+  });
+  return same ? { state: 'same', existing } : { state: 'stale', existing };
+}
+// Called inside the caller's transaction, paired with detectStaleRemoteId.
+// Renames the colliding row's remote_id so the new INSERT can claim it.
+function archiveStaleRow(table, existingId, oldRemoteId) {
+  if (!SYNC_STALE_TABLES.has(table)) throw new Error(`archiveStaleRow: unsupported table ${table}`);
+  const archived = `${oldRemoteId}-stale-${Date.now()}`;
+  db.prepare(`UPDATE ${table} SET remote_id = ? WHERE id = ?`).run(archived, existingId);
+  console.warn(`[auto-sync] stale ${table} remote_id=${oldRemoteId} archived as ${archived} (existing id=${existingId})`);
 }
 
 // Import a single remote sale through the repository layer with idempotency and ID validation.
@@ -2240,20 +2366,38 @@ function importRemoteSale(sale) {
       ? '[Mobile] ' + sale.notes
       : (isReturn ? '[Mobile Return]' : '[Mobile Sale]');
 
-    const result = clientsDb.addSale({
-      client_id: localClientId,
-      date: sale.date,
-      subtotal: sale.subtotal || sale.total,
-      discount: sale.discount || 0,
-      total: sale.total,
-      paid_amount: sale.paid_amount,
-      status: sale.status || (isReturn ? 'return' : 'pending'),
-      notes,
-      items,
-      remote_id: remoteId,
+    // Stale remote_id guard. Match on client + date + total only — NOT
+    // paid_amount, because that mutates over time as post-creation payments
+    // arrive: mobile keeps sale.paid_amount at the at-creation value while
+    // desktop's importRemotePayment bumps the local copy. Including it in
+    // the fingerprint would cause every post-payment pull to false-positive
+    // as a remote_id collision, archive the existing sale, and re-insert.
+    // client+date+total is a strong-enough fingerprint after a mobile reset.
+    const stale = detectStaleRemoteId('sales', remoteId, {
+      client_id:   localClientId,
+      date:        sale.date,
+      total:       Number(sale.total) || 0,
     });
+    if (stale.state === 'same') return { ok: true, skipped: true, localId: stale.existing.id };
 
-    return { ok: true, skipped: !!result.skipped };
+    const doImport = db.transaction(() => {
+      if (stale.state === 'stale') archiveStaleRow('sales', stale.existing.id, remoteId);
+      return clientsDb.addSale({
+        client_id: localClientId,
+        date: sale.date,
+        subtotal: sale.subtotal || sale.total,
+        discount: sale.discount || 0,
+        total: sale.total,
+        paid_amount: sale.paid_amount,
+        status: sale.status || (isReturn ? 'return' : 'pending'),
+        notes,
+        items,
+        remote_id: remoteId,
+      });
+    });
+    const result = doImport();
+
+    return { ok: true, skipped: !!result.skipped, localId: result.lastInsertRowid };
   } catch (err) {
     return { ok: false, skipped: false, error: err.message };
   }
@@ -2302,6 +2446,32 @@ function importRemoteClient(client) {
     const action = client.__action || 'create';
     const existing = db.prepare('SELECT id FROM clients WHERE remote_id = ?').get(remoteId);
 
+    // ---- DELETE: mobile says this client should be removed. Mirror the
+    // mobile-side guard: refuse to drop a client that has desktop sales,
+    // because nulling sale.client_id would corrupt revenue attribution.
+    // For a clean profile (no sales), cascade-delete client_payments via
+    // FK and drop the row.
+    //
+    // The pull marks the sync_log entry as synced regardless of outcome
+    // (delivery-once semantics, see sync.js:686-689). So if we returned an
+    // error here, the delete would be silently lost forever and the desktop
+    // would keep a zombie client mobile already removed. Better to skip with
+    // a warning: the client stays on desktop (correct for audit since we
+    // have sales referencing it), and the desktop's NEXT push will re-create
+    // the client on mobile from the desktop snapshot. Net effect: mobile's
+    // "delete" becomes a no-op the user can see (client comes back on next
+    // sync), which surfaces the conflict instead of hiding it.
+    if (action === 'delete') {
+      if (!existing) return { ok: true, skipped: true };
+      const saleCount = db.prepare('SELECT COUNT(*) AS c FROM sales WHERE client_id = ?').get(existing.id).c;
+      if (saleCount > 0) {
+        console.warn(`[sync:pull] Client ${existing.id} has ${saleCount} desktop sales — keeping client (mobile delete ignored).`);
+        return { ok: true, skipped: true };
+      }
+      db.prepare('DELETE FROM clients WHERE id = ?').run(existing.id);
+      return { ok: true };
+    }
+
     // ---- UPDATE: sync field values, but RECOMPUTE balance locally from
     // desktop's own ledger. Reason: if the client has desktop-origin sales
     // or payments that mobile doesn't know about, blindly accepting
@@ -2349,8 +2519,17 @@ function importRemoteClient(client) {
       return { ok: true, skipped: false, localId: existing.id };
     }
 
-    // ---- CREATE: skip if already present (idempotency)
-    if (existing) return { ok: true, skipped: true };
+    // ---- CREATE: skip if same row; archive if stale collision.
+    // Mobile resets cause old remote_ids ('10', '11', …) to collide with new
+    // ones. Compare by name + phone so two different clients with the same
+    // name (common) aren't falsely deduped together. Archive + insert run
+    // atomically in one transaction so a crash between them can't leave a
+    // renamed stale row with no replacement.
+    const stale = detectStaleRemoteId('clients', remoteId, {
+      name:  client.name,
+      phone: client.phone || null,
+    });
+    if (stale.state === 'same') return { ok: true, skipped: true, localId: stale.existing.id };
 
     // CRITICAL: insert balance=0 (not client.balance from the snapshot).
     // The snapshot balance already reflects all payments/sales that are
@@ -2363,22 +2542,26 @@ function importRemoteClient(client) {
     // mobile POST /api/clients hardcodes balance=0, there's no "opening
     // balance" to preserve — every non-zero balance comes from a payment
     // or sale that's also in the sync queue.
-    const result = db.prepare(`
-      INSERT INTO clients
-        (name, phone, address, email, notes, balance,
-         credit_blocked, last_contact_note, last_contact_at, remote_id)
-      VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
-    `).run(
-      client.name,
-      client.phone             || null,
-      client.address           || null,
-      client.email             || null,
-      client.notes             || null,
-      client.credit_blocked ? 1 : 0,
-      client.last_contact_note || null,
-      client.last_contact_at   || null,
-      remoteId
-    );
+    const tx = db.transaction(() => {
+      if (stale.state === 'stale') archiveStaleRow('clients', stale.existing.id, remoteId);
+      return db.prepare(`
+        INSERT INTO clients
+          (name, phone, address, email, notes, balance,
+           credit_blocked, last_contact_note, last_contact_at, remote_id)
+        VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
+      `).run(
+        client.name,
+        client.phone             || null,
+        client.address           || null,
+        client.email             || null,
+        client.notes             || null,
+        client.credit_blocked ? 1 : 0,
+        client.last_contact_note || null,
+        client.last_contact_at   || null,
+        remoteId
+      );
+    });
+    const result = tx();
     return { ok: true, skipped: false, localId: result.lastInsertRowid };
   } catch (err) {
     return { ok: false, skipped: false, error: err.message };
@@ -2419,7 +2602,13 @@ function importRemotePayment(payment) {
       if (!mobileId) return { ok: false, error: 'update missing id' };
       const remoteId = `mob-${mobileId}`;
       const existing = db.prepare('SELECT * FROM client_payments WHERE remote_id = ?').get(remoteId);
-      if (!existing) return { ok: false, error: 'update target not found' };
+      // If the original create was never pulled (e.g. last_sync_pull was reset
+      // or the create batch failed), don't silently drop the edit — fall
+      // through to the CREATE branch below so the payment still lands.
+      if (!existing) {
+        console.warn(`[auto-sync] payment update for ${remoteId} has no local row; treating as create`);
+        // Intentional fall-through: skip the rest of UPDATE and reach CREATE.
+      } else {
 
       const newAmount = payment.amount;
       const delta = Math.round((newAmount - existing.amount) * 100) / 100;
@@ -2440,16 +2629,14 @@ function importRemotePayment(payment) {
       });
       tx();
       return { ok: true };
+      } // close else (existing found)
+      // else: no existing row, fall through to CREATE below
     }
 
     // ---- CREATE action (default)
     const mobileId = payment.id;
     if (!mobileId) return { ok: false, error: 'no mobile payment id' };
     const remoteId = `mob-${mobileId}`;
-
-    // Dedupe
-    const existing = db.prepare('SELECT id FROM client_payments WHERE remote_id = ?').get(remoteId);
-    if (existing) return { ok: true, skipped: true };
 
     if (!payment.client_id) return { ok: false, error: 'payment missing client_id' };
     // Translate mobile client_id → local desktop client id. For desktop-origin
@@ -2466,7 +2653,20 @@ function importRemotePayment(payment) {
     // point at a completely unrelated desktop sale and silently corrupt it.
     const localSaleId = payment.sale_id != null ? resolveMobileSaleId(payment.sale_id) : null;
 
+    // Stale-collision check: after a mobile reset, 'mob-1', 'mob-2'… can
+    // collide with real historical payments we already imported from the
+    // prior mobile instance. Compare by client + amount + date + method —
+    // match means idempotent replay; mismatch means archive the old row.
+    const stale = detectStaleRemoteId('client_payments', remoteId, {
+      client_id: localClientId,
+      amount:    Number(payment.amount) || 0,
+      date:      payment.date,
+      method:    payment.method || 'cash',
+    });
+    if (stale.state === 'same') return { ok: true, skipped: true, localId: stale.existing.id };
+
     const tx = db.transaction(() => {
+      if (stale.state === 'stale') archiveStaleRow('client_payments', stale.existing.id, remoteId);
       const res = db.prepare(`
         INSERT INTO client_payments
           (client_id, sale_id, amount, date, method, notes, batch_id, created_by, remote_id)
@@ -2584,26 +2784,36 @@ function importRemoteSupplier(supplier) {
       return { ok: true, skipped: false, localId: existing.id };
     }
 
-    // ---- CREATE: idempotent via remote_id
-    if (existing) return { ok: true, skipped: true };
+    // ---- CREATE: skip if same row; archive if stale collision. Compare by
+    // name + phone (two distinct suppliers can share a name); archive + insert
+    // run in one transaction so a crash between them can't orphan the archive.
+    const stale = detectStaleRemoteId('suppliers', remoteId, {
+      name:  supplier.name,
+      phone: supplier.phone || null,
+    });
+    if (stale.state === 'same') return { ok: true, skipped: true, localId: stale.existing.id };
 
     // CRITICAL: insert balance=0 (not supplier.balance from the snapshot).
     // Same double-counting bug that importRemoteClient fixed: supplier_payments
     // from the same pull batch re-apply their delta via importRemoteSupplierPayment,
     // so taking the snapshot balance here would double-count every payment.
     // Balance is DERIVED state — let the payment import flow rebuild it.
-    const result = db.prepare(`
-      INSERT INTO suppliers
-        (name, phone, address, email, notes, balance, remote_id)
-      VALUES (?, ?, ?, ?, ?, 0, ?)
-    `).run(
-      supplier.name,
-      supplier.phone   || null,
-      supplier.address || null,
-      supplier.email   || null,
-      supplier.notes   || null,
-      remoteId
-    );
+    const tx = db.transaction(() => {
+      if (stale.state === 'stale') archiveStaleRow('suppliers', stale.existing.id, remoteId);
+      return db.prepare(`
+        INSERT INTO suppliers
+          (name, phone, address, email, notes, balance, remote_id)
+        VALUES (?, ?, ?, ?, ?, 0, ?)
+      `).run(
+        supplier.name,
+        supplier.phone   || null,
+        supplier.address || null,
+        supplier.email   || null,
+        supplier.notes   || null,
+        remoteId
+      );
+    });
+    const result = tx();
     return { ok: true, skipped: false, localId: result.lastInsertRowid };
   } catch (err) {
     return { ok: false, skipped: false, error: err.message };
@@ -2684,19 +2894,28 @@ function importRemoteSupplierPayment(payment) {
     if (!mobileId) return { ok: false, error: 'no mobile supplier_payment id' };
     const remoteId = `sup-mob-${mobileId}`;
 
-    const existing = db.prepare('SELECT id FROM supplier_payments WHERE remote_id = ?').get(remoteId);
-    if (existing) return { ok: true, skipped: true };
-
     if (!payment.supplier_id) return { ok: false, error: 'supplier_payment missing supplier_id' };
     const localSupplierId = resolveMobileSupplierId(payment.supplier_id);
     if (!localSupplierId) {
       return { ok: false, error: `supplier ${payment.supplier_id} not found locally` };
     }
 
+    // Stale-collision check: mirror the client_payments logic, with method
+    // added as an extra discriminator so two legit same-day same-amount
+    // payments (one cash, one wire) don't false-positive as identical.
+    const stale = detectStaleRemoteId('supplier_payments', remoteId, {
+      supplier_id: localSupplierId,
+      amount:      Number(payment.amount) || 0,
+      date:        payment.date,
+      method:      payment.method || 'cash',
+    });
+    if (stale.state === 'same') return { ok: true, skipped: true, localId: stale.existing.id };
+
     // Mobile doesn't have purchases (they're desktop-only), so purchase_id
     // should be null for mobile-originated payments. If somehow it's set, we
     // ignore it — mobile has no way to reference a desktop purchase reliably.
     const tx = db.transaction(() => {
+      if (stale.state === 'stale') archiveStaleRow('supplier_payments', stale.existing.id, remoteId);
       const res = db.prepare(`
         INSERT INTO supplier_payments
           (supplier_id, purchase_id, amount, date, method, notes, batch_id, created_by, remote_id)

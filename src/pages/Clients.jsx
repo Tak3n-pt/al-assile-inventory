@@ -611,6 +611,29 @@ const Clients = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
+                        {client.phone && (client.balance || 0) < 0 && (
+                          <button
+                            onClick={async () => {
+                              const owed = Math.abs(client.balance || 0);
+                              const msg = t('whatsappReminderTemplate')
+                                .replace('{name}', client.name || '')
+                                .replace('{amount}', `${owed.toLocaleString()} DZD`);
+                              let phone = String(client.phone).replace(/[^0-9]/g, '');
+                              if (phone.startsWith('00')) phone = phone.slice(2);
+                              if (phone.startsWith('0'))  phone = '213' + phone.slice(1);
+                              const e164 = phone.startsWith('213') ? phone : '213' + phone;
+                              window.open(`https://wa.me/${e164}?text=${encodeURIComponent(msg)}`, '_blank');
+                              try {
+                                await window.api.clients.recordContact(client.id, t('reminderSentNote'));
+                                await loadData();
+                              } catch { /* offline / IPC hiccup — don't block the user */ }
+                            }}
+                            className="p-2 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors"
+                            title={t('sendWhatsAppReminder')}
+                          >
+                            <span className="text-base leading-none">💬</span>
+                          </button>
+                        )}
                         <button
                           onClick={() => openVersement(client)}
                           className="p-2 rounded-lg text-dark-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"

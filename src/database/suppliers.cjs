@@ -215,6 +215,47 @@ const suppliersQueries = (db) => ({
     `).all(supplierId);
   },
 
+  // Edit a supplier_payment: change amount/date/notes after the fact.
+  // Mirrors updateClientPayment semantics: balance moves by (new − old) and,
+  // if linked to a purchase, the purchase paid_amount/status is adjusted by
+  // the same delta. Other fields (supplier_id, purchase_id, method) are NOT
+  // editable here — delete + re-create instead, to keep the audit clean.
+  updateSupplierPayment: (id, data) => {
+    return db.transaction(() => {
+      const existing = db.prepare('SELECT * FROM supplier_payments WHERE id = ?').get(id);
+      if (!existing) throw new Error('Payment not found');
+
+      const newAmount = data.amount !== undefined ? Number(data.amount) : existing.amount;
+      const newDate   = data.date   !== undefined ? String(data.date)  : existing.date;
+      const newNotes  = data.notes  !== undefined ? (data.notes || null) : existing.notes;
+
+      if (!Number.isFinite(newAmount) || newAmount <= 0) {
+        throw new Error('Amount must be positive');
+      }
+
+      const delta = Math.round((newAmount - existing.amount) * 100) / 100;
+
+      if (existing.purchase_id) {
+        const purchase = db.prepare('SELECT total, paid_amount FROM purchases WHERE id = ?').get(existing.purchase_id);
+        if (purchase) {
+          const newPaid = Math.max(0, Math.round((purchase.paid_amount + delta) * 100) / 100);
+          const newStatus = newPaid >= purchase.total ? 'paid' : newPaid > 0 ? 'partial' : 'pending';
+          db.prepare('UPDATE purchases SET paid_amount = ?, status = ? WHERE id = ?')
+            .run(newPaid, newStatus, existing.purchase_id);
+        }
+      }
+      if (delta !== 0) {
+        db.prepare('UPDATE suppliers SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+          .run(delta, existing.supplier_id);
+      }
+      db.prepare(`
+        UPDATE supplier_payments SET amount = ?, date = ?, notes = ? WHERE id = ?
+      `).run(newAmount, newDate, newNotes, id);
+
+      return { changes: 1 };
+    })();
+  },
+
   deleteSupplierPayment: (id) => {
     return db.transaction(() => {
       const existing = db.prepare('SELECT * FROM supplier_payments WHERE id = ?').get(id);

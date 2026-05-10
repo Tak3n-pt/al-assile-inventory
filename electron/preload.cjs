@@ -101,6 +101,7 @@ contextBridge.exposeInMainWorld('api', {
     recordVersement: (supplierId, amount, opts) => ipcRenderer.invoke('suppliers:recordVersement', supplierId, amount, opts),
     getPayments: (supplierId) => ipcRenderer.invoke('suppliers:getPayments', supplierId),
     deletePayment: (id, userId) => ipcRenderer.invoke('suppliers:deletePayment', id, userId),
+    updatePayment: (id, data, userId) => ipcRenderer.invoke('suppliers:updatePayment', id, data, userId),
     audit: () => ipcRenderer.invoke('suppliers:audit'),
     repairBalance: (id, userId) => ipcRenderer.invoke('suppliers:repairBalance', id, userId),
   },
