@@ -452,7 +452,7 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
               {/* Product Image */}
               <div>
                 <label className="block text-sm font-medium text-dark-300 mb-2">
-                  {t('productImage') || 'Product Image'}
+                  {t('productImage')}
                 </label>
                 <div className="flex items-start gap-5">
                   {imagePreview ? (
@@ -470,7 +470,7 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                   ) : (
                     <div className="w-32 h-32 rounded-xl border-2 border-dark-700 border-dashed flex flex-col items-center justify-center bg-dark-800/30 gap-2">
                       <Package className="w-10 h-10 text-dark-600" />
-                      <span className="text-dark-500 text-xs">{t('noImage') || 'No image'}</span>
+                      <span className="text-dark-500 text-xs">{t('noImage')}</span>
                     </div>
                   )}
                   <div className="flex flex-col gap-2 pt-2">
@@ -480,7 +480,7 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                       className="px-4 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-dark-300 hover:text-white hover:border-dark-600 transition-colors flex items-center gap-2"
                     >
                       <ImagePlus size={16} />
-                      {imagePreview ? (t('changeImage') || 'Change Image') : (t('selectImage') || 'Select Image')}
+                      {imagePreview ? t('changeImage') : t('selectImage')}
                     </button>
                     <p className="text-dark-500 text-xs">JPG, PNG, WebP (max 5MB)</p>
                   </div>
@@ -490,8 +490,8 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
               {/* Resale Product Toggle */}
               <div className="flex items-center justify-between p-4 rounded-xl bg-dark-800/50 border border-dark-700/50">
                 <div>
-                  <p className="text-white font-medium">{t('resaleProduct') || 'Resale Product'}</p>
-                  <p className="text-dark-400 text-sm">{t('resaleProductDesc') || 'Buy and sell directly without production'}</p>
+                  <p className="text-white font-medium">{t('resaleProduct')}</p>
+                  <p className="text-dark-400 text-sm">{t('resaleProductDesc')}</p>
                 </div>
                 <button
                   type="button"
@@ -566,7 +566,7 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
                     {formData.is_resale
-                      ? (t('purchasePriceDZD') || 'Purchase Price (DZD)')
+                      ? t('purchasePriceDZD')
                       : t('manualCostOptional')}
                   </label>
                   <input
@@ -658,7 +658,7 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                                 style={{ backgroundColor: '#1e293b', maxHeight: '200px', zIndex: 100 }}
                               >
                                 {stockItems.length === 0 ? (
-                                  <div className="px-3 py-3 text-sm text-dark-400">{t('noStockItems') || 'No stock items'}</div>
+                                  <div className="px-3 py-3 text-sm text-dark-400">{t('noStockItems')}</div>
                                 ) : (
                                   stockItems.map(stock => (
                                     <button
@@ -830,13 +830,13 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                     <Package className="w-5 h-5 text-emerald-400" />
                   </div>
                   <div>
-                    <p className="text-emerald-400 font-medium">{t('resaleProductNote') || 'Resale Product'}</p>
-                    <p className="text-dark-400 text-sm">{t('resaleProductInfo') || 'This product will be purchased and sold directly. Use "Add Stock" in the inventory page to add quantities.'}</p>
+                    <p className="text-emerald-400 font-medium">{t('resaleProductNote')}</p>
+                    <p className="text-dark-400 text-sm">{t('resaleProductInfo')}</p>
                   </div>
                 </div>
                 {formData.purchase_price && formData.selling_price && (
                   <div className="mt-3 pt-3 border-t border-emerald-500/20 flex justify-between">
-                    <span className="text-dark-400 text-sm">{t('profitPerUnit') || 'Profit per unit'}:</span>
+                    <span className="text-dark-400 text-sm">{t('profitPerUnit')}:</span>
                     <span className={`font-medium ${
                       parseFloat(formData.selling_price) > parseFloat(formData.purchase_price)
                         ? 'text-emerald-400'

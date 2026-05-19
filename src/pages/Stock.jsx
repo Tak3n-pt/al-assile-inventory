@@ -18,6 +18,7 @@ import PageHeader from '../components/PageHeader';
 import StockModal from '../components/StockModal';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useNotification } from '../contexts/NotificationContext';
+import useDataChanged from '../hooks/useDataChanged';
 import { useAuth } from '../contexts/AuthContext';
 import CustomSelect from '../components/CustomSelect';
 
@@ -87,6 +88,9 @@ const Stock = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Stock moves when batches are produced, sales happen, or other pages adjust stock
+  useDataChanged(['stock', 'products'], () => loadData());
 
   // Filter items
   const filteredItems = stockItems.filter(item => {

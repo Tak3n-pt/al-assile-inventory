@@ -74,7 +74,7 @@ const ReportGeneratorModal = ({ isOpen, onClose, reportType, settings }) => {
       needsClient: true
     },
     expenseReport: {
-      title: t('expenseReport') || 'Expense Report',
+      title: t('expenseReport'),
       titleAr: 'تقرير المصاريف',
       icon: DollarSign,
       gradient: 'from-amber-500 to-orange-500',
@@ -83,7 +83,7 @@ const ReportGeneratorModal = ({ isOpen, onClose, reportType, settings }) => {
       needsClient: false
     },
     monthlySummary: {
-      title: t('monthlySummary') || 'Monthly Summary',
+      title: t('monthlySummary'),
       titleAr: 'الملخص الشهري',
       icon: LayoutDashboard,
       gradient: 'from-indigo-500 to-violet-500',
@@ -93,7 +93,7 @@ const ReportGeneratorModal = ({ isOpen, onClose, reportType, settings }) => {
       needsMonthYear: true
     },
     productSheet: {
-      title: t('productSheet') || 'Product Sheet',
+      title: t('productSheet'),
       titleAr: 'بطاقة المنتج',
       icon: Package,
       gradient: 'from-emerald-500 to-teal-500',
@@ -103,7 +103,7 @@ const ReportGeneratorModal = ({ isOpen, onClose, reportType, settings }) => {
       needsProduct: true
     },
     productionReport: {
-      title: t('productionReport') || 'Production Report',
+      title: t('productionReport'),
       titleAr: 'تقرير الإنتاج',
       icon: Factory,
       gradient: 'from-purple-500 to-violet-500',

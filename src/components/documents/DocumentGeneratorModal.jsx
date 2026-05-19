@@ -66,35 +66,35 @@ const DocumentGeneratorModal = ({
       Template: ProformaTemplate
     },
     purchase_order: {
-      title: t('purchaseOrder') || 'Bon de Commande',
+      title: t('purchaseOrder'),
       titleAr: 'طلب شراء',
       icon: FileText,
       gradient: 'from-sky-500 to-blue-500',
       Template: PurchaseOrderTemplate
     },
     exit_voucher: {
-      title: t('exitVoucher') || 'Bon de Sortie',
+      title: t('exitVoucher'),
       titleAr: 'سند الخروج',
       icon: FileText,
       gradient: 'from-amber-500 to-orange-500',
       Template: ExitVoucherTemplate
     },
     credit_note: {
-      title: t('creditNote') || 'Avoir',
+      title: t('creditNote'),
       titleAr: 'إشعار دائن',
       icon: FileText,
       gradient: 'from-rose-500 to-red-500',
       Template: CreditNoteTemplate
     },
     quote: {
-      title: t('quoteEstimate') || 'Devis',
+      title: t('quoteEstimate'),
       titleAr: 'عرض أسعار',
       icon: FilePlus,
       gradient: 'from-violet-500 to-indigo-500',
       Template: QuoteTemplate
     },
     reception_voucher: {
-      title: t('receptionVoucher') || 'Bon de Réception',
+      title: t('receptionVoucher'),
       titleAr: 'سند الاستلام',
       icon: FileCheck,
       gradient: 'from-teal-500 to-cyan-500',

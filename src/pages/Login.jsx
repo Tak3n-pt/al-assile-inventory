@@ -26,7 +26,7 @@ const AlAssileLogo = ({ size = 64 }) => (
 const Login = () => {
   const navigate = useNavigate();
   const { login } = useAuth();
-  const { language, setLanguage } = useLanguage();
+  const { language, setLanguage, t } = useLanguage();
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -46,7 +46,7 @@ const Login = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!username || !password) {
-      setError(language === 'ar' ? 'يرجى إدخال اسم المستخدم وكلمة المرور' : language === 'fr' ? 'Veuillez entrer le nom d\'utilisateur et le mot de passe' : 'Please enter username and password');
+      setError(t('loginRequired'));
       return;
     }
 
@@ -63,10 +63,10 @@ const Login = () => {
           navigate('/');
         }
       } else {
-        setError(result.error || (language === 'ar' ? 'فشل تسجيل الدخول' : language === 'fr' ? 'Échec de la connexion' : 'Login failed'));
+        setError(result.error || t('loginFailed'));
       }
     } catch (err) {
-      setError(language === 'ar' ? 'حدث خطأ' : language === 'fr' ? 'Une erreur est survenue' : 'An error occurred');
+      setError(t('errorOccurred'));
     } finally {
       setLoading(false);
     }
@@ -100,21 +100,9 @@ const Login = () => {
   };
 
   const features = [
-    {
-      icon: Package,
-      label: language === 'ar' ? 'إدارة المخزون' : language === 'fr' ? 'Gestion de Stock' : 'Inventory',
-      value: language === 'ar' ? 'تتبع كامل' : language === 'fr' ? 'Suivi complet' : 'Full tracking'
-    },
-    {
-      icon: TrendingUp,
-      label: language === 'ar' ? 'المبيعات' : language === 'fr' ? 'Ventes' : 'Sales',
-      value: language === 'ar' ? 'نقطة بيع' : language === 'fr' ? 'Point de vente' : 'POS ready'
-    },
-    {
-      icon: Shield,
-      label: language === 'ar' ? 'الأمان' : language === 'fr' ? 'Sécurité' : 'Security',
-      value: language === 'ar' ? 'حسب الأدوار' : language === 'fr' ? 'Par rôles' : 'Role-gated'
-    }
+    { icon: Package, label: t('inventoryFeature'), value: t('inventoryFeatureDesc') },
+    { icon: TrendingUp, label: t('salesFeature'), value: t('salesFeatureDesc') },
+    { icon: Shield, label: t('securityFeature'), value: t('securityFeatureDesc') }
   ];
 
   const langOptions = [
@@ -149,31 +137,23 @@ const Login = () => {
             <AlAssileLogo size={48} />
             <div>
               <h1 className="text-xl font-bold" style={{ color: '#D4A574' }}>
-                {language === 'ar' ? 'الأصيل' : 'Al Assile'}
+                {t('companyName')}
               </h1>
               <p className="text-xs font-medium" style={{ color: '#8B7355' }}>
-                {language === 'ar' ? 'منتجات التمور' : language === 'fr' ? 'Produits de Dattes' : 'Date Products'}
+                {t('businessType')}
               </p>
             </div>
           </div>
 
           <div className="mt-12">
             <p className="text-sm font-medium mb-2" style={{ color: '#8B7355' }}>
-              {language === 'ar' ? 'لوحة الإدارة' : language === 'fr' ? 'PANNEAU D\'ADMINISTRATION' : 'ADMIN WORKSPACE'}
+              {t('adminWorkspace')}
             </p>
             <h2 className="text-2xl font-semibold leading-snug" style={{ color: '#e8d5c0' }}>
-              {language === 'ar'
-                ? 'إدارة شاملة لأعمالك من مكان واحد'
-                : language === 'fr'
-                  ? 'Gérez votre activité depuis un seul espace'
-                  : 'Manage your entire business from one place'}
+              {t('workspaceHeading')}
             </h2>
             <p className="mt-3 text-sm leading-relaxed" style={{ color: '#6b5a4a' }}>
-              {language === 'ar'
-                ? 'تتبع المخزون، إدارة المبيعات، متابعة العملاء والموردين، وإنشاء الوثائق التجارية'
-                : language === 'fr'
-                  ? 'Suivez le stock, gérez les ventes, clients et fournisseurs, et générez des documents commerciaux'
-                  : 'Track inventory, manage sales, monitor clients & suppliers, and generate business documents'}
+              {t('workspaceDesc')}
             </p>
           </div>
         </div>
@@ -198,7 +178,7 @@ const Login = () => {
           </div>
 
           <p className="text-[11px] mt-6 text-center" style={{ color: '#3D2914' }}>
-            © {new Date().getFullYear()} Al Assile — {language === 'ar' ? 'جميع الحقوق محفوظة' : language === 'fr' ? 'Tous droits réservés' : 'All Rights Reserved'}
+            © {new Date().getFullYear()} Al Assile — {t('allRightsReserved')}
           </p>
         </div>
       </div>
@@ -219,7 +199,7 @@ const Login = () => {
           <div className="lg:hidden text-center mb-8">
             <AlAssileLogo size={56} />
             <h1 className="text-xl font-bold mt-3" style={{ color: '#D4A574' }}>
-              {language === 'ar' ? 'الأصيل' : 'Al Assile'}
+              {t('companyName')}
             </h1>
           </div>
 
@@ -246,21 +226,13 @@ const Login = () => {
           {/* Header */}
           <div className="mb-8">
             <p className="text-xs font-medium uppercase tracking-widest mb-2" style={{ color: '#D4A574' }}>
-              {language === 'ar' ? 'تسجيل الدخول' : language === 'fr' ? 'Connexion' : 'Sign in'}
+              {t('signInEyebrow')}
             </p>
             <h2 className="text-2xl font-bold text-white">
-              {language === 'ar'
-                ? 'الدخول إلى لوحة التحكم'
-                : language === 'fr'
-                  ? 'Accéder au tableau de bord'
-                  : 'Access the dashboard'}
+              {t('signInHeading')}
             </h2>
             <p className="text-sm mt-2" style={{ color: '#666' }}>
-              {language === 'ar'
-                ? 'استخدم بيانات المسؤول لتسجيل الدخول'
-                : language === 'fr'
-                  ? 'Utilisez vos identifiants pour vous connecter'
-                  : 'Enter your credentials to continue'}
+              {t('signInSubtitle')}
             </p>
           </div>
 
@@ -285,7 +257,7 @@ const Login = () => {
             {/* Username */}
             <div>
               <label htmlFor="username" className="block text-xs font-medium uppercase tracking-wider mb-2" style={{ color: '#888' }}>
-                {language === 'ar' ? 'اسم المستخدم' : language === 'fr' ? 'Nom d\'utilisateur' : 'Username'}
+                {t('usernameLabel')}
               </label>
               <div className="relative">
                 <User size={18} className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: '#555' }} />
@@ -294,7 +266,7 @@ const Login = () => {
                   type="text"
                   value={username}
                   onChange={(e) => { setUsername(e.target.value); setError(''); }}
-                  placeholder={language === 'ar' ? 'أدخل اسم المستخدم' : language === 'fr' ? 'Entrez le nom d\'utilisateur' : 'Enter username'}
+                  placeholder={t('usernamePlaceholder')}
                   autoComplete="username"
                   autoFocus
                   className="w-full pl-11 pr-4 py-3 rounded-xl text-sm text-white placeholder-gray-600 transition-all outline-none focus:ring-1 focus:ring-amber-700/50"
@@ -309,7 +281,7 @@ const Login = () => {
             {/* Password */}
             <div>
               <label htmlFor="password" className="block text-xs font-medium uppercase tracking-wider mb-2" style={{ color: '#888' }}>
-                {language === 'ar' ? 'كلمة المرور' : language === 'fr' ? 'Mot de passe' : 'Password'}
+                {t('passwordLabel')}
               </label>
               <div className="relative">
                 <Lock size={18} className="absolute left-4 top-1/2 -translate-y-1/2 pointer-events-none" style={{ color: '#555' }} />
@@ -318,7 +290,7 @@ const Login = () => {
                   type={showPassword ? 'text' : 'password'}
                   value={password}
                   onChange={(e) => { setPassword(e.target.value); setError(''); }}
-                  placeholder={language === 'ar' ? 'أدخل كلمة المرور' : language === 'fr' ? 'Entrez le mot de passe' : 'Enter password'}
+                  placeholder={t('passwordPlaceholder')}
                   autoComplete="current-password"
                   className="w-full pl-11 pr-11 py-3 rounded-xl text-sm text-white placeholder-gray-600 transition-all outline-none focus:ring-1 focus:ring-amber-700/50"
                   style={{
@@ -331,7 +303,7 @@ const Login = () => {
                   onClick={() => setShowPassword(!showPassword)}
                   className="absolute right-3 top-1/2 -translate-y-1/2 p-1 rounded-lg transition-colors hover:bg-white/5"
                   style={{ color: '#555' }}
-                  aria-label="Toggle password visibility"
+                  aria-label={t('togglePasswordVisibility')}
                 >
                   {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
                 </button>
@@ -352,12 +324,12 @@ const Login = () => {
               {loading ? (
                 <>
                   <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: 'rgba(255,255,255,0.2)', borderTopColor: '#fff' }} />
-                  <span>{language === 'ar' ? 'جاري الدخول...' : language === 'fr' ? 'Connexion...' : 'Signing in...'}</span>
+                  <span>{t('signingIn')}</span>
                 </>
               ) : (
                 <>
                   <LogIn size={18} />
-                  <span>{language === 'ar' ? 'تسجيل الدخول' : language === 'fr' ? 'Se connecter' : 'Sign In'}</span>
+                  <span>{t('signIn')}</span>
                 </>
               )}
             </button>
@@ -365,7 +337,7 @@ const Login = () => {
 
           {/* Footer text */}
           <p className="text-center text-[11px] mt-8" style={{ color: '#333' }}>
-            {language === 'ar' ? 'نظام إدارة المخزون — الأصيل' : language === 'fr' ? 'Système de Gestion — Al Assile' : 'Inventory Management — Al Assile'}
+            {t('appTitleFull')}
           </p>
         </div>
       </div>

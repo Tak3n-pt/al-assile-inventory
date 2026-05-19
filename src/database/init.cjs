@@ -11,6 +11,28 @@ const initDatabase = (db) => {
     return columns.some(c => c.name === column);
   };
 
+  // Schema version tracking - each numbered migration runs once and is recorded
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      version INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  const runMigration = (version, name, fn) => {
+    const already = db.prepare('SELECT 1 FROM schema_migrations WHERE version = ?').get(version);
+    if (already) return;
+    try {
+      fn();
+      db.prepare('INSERT INTO schema_migrations (version, name) VALUES (?, ?)').run(version, name);
+      console.log(`Migration #${version} applied: ${name}`);
+    } catch (e) {
+      console.error(`Migration #${version} (${name}) failed:`, e.message);
+      throw e;
+    }
+  };
+
   // ============================================
   // STOCK CATEGORIES
   // ============================================
@@ -363,13 +385,13 @@ const initDatabase = (db) => {
     CREATE TABLE IF NOT EXISTS purchase_items (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       purchase_id INTEGER NOT NULL,
-      stock_id INTEGER NOT NULL,
+      stock_item_id INTEGER NOT NULL,
       quantity REAL NOT NULL,
       unit_price REAL NOT NULL,
       total REAL NOT NULL,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE CASCADE,
-      FOREIGN KEY (stock_id) REFERENCES stock(id)
+      FOREIGN KEY (stock_item_id) REFERENCES stock(id)
     )
   `);
 
@@ -472,8 +494,14 @@ const initDatabase = (db) => {
   try {
     const salesInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='sales'").get();
     if (salesInfo && salesInfo.sql && salesInfo.sql.includes("CHECK") && !salesInfo.sql.includes("'return'")) {
+      // Clean up any orphaned sales_new from a previous failed migration
+      db.exec('DROP TABLE IF EXISTS sales_new');
+      // Get actual columns to preserve them in the migration
+      const cols = db.prepare("PRAGMA table_info(sales)").all().map(c => c.name);
+      const colList = cols.join(', ');
+      db.pragma('foreign_keys = OFF');
       db.exec(`
-        CREATE TABLE IF NOT EXISTS sales_new (
+        CREATE TABLE sales_new (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           client_id INTEGER,
           date DATE NOT NULL,
@@ -486,14 +514,16 @@ const initDatabase = (db) => {
           created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
           FOREIGN KEY (client_id) REFERENCES clients(id)
         );
-        INSERT INTO sales_new SELECT * FROM sales;
+        INSERT INTO sales_new (${colList}) SELECT ${colList} FROM sales;
         DROP TABLE sales;
         ALTER TABLE sales_new RENAME TO sales;
       `);
+      db.pragma('foreign_keys = ON');
       console.log('Migration: added return status to sales table');
     }
   } catch (e) {
     console.log('Sales status migration check:', e.message);
+    try { db.pragma('foreign_keys = ON'); } catch (_) {}
   }
 
   // ============================================
@@ -566,6 +596,9 @@ const initDatabase = (db) => {
     { key: 'next_credit_note_number', value: '1' },
     { key: 'next_quote_number', value: '1' },
     { key: 'next_reception_voucher_number', value: '1' },
+    // Cloud sync defaults — preseeded so the installed app auto-syncs with no
+    // manual config step. INSERT OR IGNORE means an existing user's overrides
+    // are never clobbered on upgrade.
     { key: 'cloud_server_url', value: 'https://al-assile-mobile.onrender.com' },
     { key: 'cloud_sync_key', value: 'alassile2024sync' }
   ];
@@ -578,53 +611,170 @@ const initDatabase = (db) => {
     insertSetting.run(setting.key, setting.value);
   }
 
-  // Migration: track mobile supplier/client payments already applied (prevents double-balance)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS mobile_processed (
-      id TEXT PRIMARY KEY
-    )
-  `);
+  // Numbered migrations (run once, in order, tracked in schema_migrations)
+  runMigration(1, 'add sales.remote_id for idempotent sync pulls', () => {
+    if (!columnExists('sales', 'remote_id')) {
+      db.exec('ALTER TABLE sales ADD COLUMN remote_id TEXT');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sales_remote_id ON sales(remote_id) WHERE remote_id IS NOT NULL');
+    }
+  });
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS client_payments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      sale_id INTEGER,
-      amount REAL NOT NULL,
-      method TEXT DEFAULT 'cash',
-      date DATE NOT NULL,
-      notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (sale_id) REFERENCES sales(id)
-    )
-  `);
+  // Database-level backstop against oversell: if a race in the renderer or a sync pull
+  // ever tries to drive a product's quantity negative, the UPDATE fails and the
+  // enclosing sale transaction rolls back. SQLite can't ALTER TABLE to add CHECK,
+  // so we recreate the products table. Also clamp any existing negative rows to 0
+  // before the constraint flip.
+  runMigration(2, 'add CHECK(quantity >= 0) to products', () => {
+    const tableInfo = db.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='products'").get();
+    if (tableInfo && tableInfo.sql && tableInfo.sql.includes('CHECK(quantity')) return;
 
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS supplier_payments (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      supplier_id INTEGER,
-      amount REAL NOT NULL,
-      method TEXT DEFAULT 'cash',
-      date DATE NOT NULL,
-      notes TEXT,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
-    )
-  `);
+    db.exec('DROP TABLE IF EXISTS products_new');
+    const cols = db.prepare("PRAGMA table_info(products)").all().map(c => c.name);
+    const colList = cols.join(', ');
+    db.pragma('foreign_keys = OFF');
+    db.exec(`
+      UPDATE products SET quantity = 0 WHERE quantity < 0;
+      CREATE TABLE products_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL,
+        description TEXT,
+        selling_price REAL DEFAULT 0,
+        manual_cost REAL,
+        unit TEXT DEFAULT 'pcs',
+        barcode TEXT,
+        is_favorite INTEGER DEFAULT 0,
+        image_path TEXT,
+        is_active INTEGER DEFAULT 1,
+        quantity REAL DEFAULT 0 CHECK(quantity >= 0),
+        min_stock_alert REAL DEFAULT 0,
+        is_resale INTEGER DEFAULT 0,
+        purchase_price REAL DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      );
+      INSERT INTO products_new (${colList}) SELECT ${colList} FROM products;
+      DROP TABLE products;
+      ALTER TABLE products_new RENAME TO products;
+    `);
+    db.pragma('foreign_keys = ON');
+  });
 
-  // Migration: remote_id links desktop clients to their mobile-origin id for server remap
-  if (!columnExists('clients', 'remote_id')) {
-    db.exec(`ALTER TABLE clients ADD COLUMN remote_id TEXT`);
-  }
+  // Rename purchase_items.stock_id → stock_item_id so it matches the code layer
+  // (suppliers.cjs references stock_item_id; the column was named stock_id at create
+  // time, which meant the purchases feature silently failed every call). Uses
+  // ALTER TABLE RENAME COLUMN (SQLite 3.25+); better-sqlite3 9.x ships 3.44+.
+  runMigration(3, 'rename purchase_items.stock_id to stock_item_id', () => {
+    const cols = db.prepare("PRAGMA table_info(purchase_items)").all();
+    if (cols.some(c => c.name === 'stock_item_id')) return; // already migrated
+    if (cols.some(c => c.name === 'stock_id')) {
+      db.exec('ALTER TABLE purchase_items RENAME COLUMN stock_id TO stock_item_id');
+    }
+  });
 
-  // Migration: remote_id links desktop suppliers to their mobile-origin id for server remap
-  if (!columnExists('suppliers', 'remote_id')) {
-    db.exec(`ALTER TABLE suppliers ADD COLUMN remote_id TEXT`);
-  }
+  // Client payments ledger — lets shopkeepers record, edit, delete, and adjust
+  // client debts/credits with a full audit trail. A single row is ONE money
+  // movement: positive amount = money received (credits client balance),
+  // negative = adjustment that adds to their debt.
+  //   sale_id = X  → allocated to a specific sale (paid_amount moves in lock-step)
+  //   sale_id = NULL → credit carried on the account OR manual adjustment
+  //   batch_id → groups all rows from one "versement global" for display/undo
+  // ON DELETE CASCADE from client_id (deleteClient wipes history)
+  // ON DELETE SET NULL from sale_id (deleteSale orphans the payment — we keep
+  // the audit breadcrumb, user can tidy manually if needed)
+  runMigration(4, 'create client_payments ledger', () => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS client_payments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        client_id INTEGER NOT NULL,
+        sale_id INTEGER,
+        amount REAL NOT NULL,
+        date DATE NOT NULL,
+        method TEXT NOT NULL DEFAULT 'cash',
+        notes TEXT,
+        batch_id TEXT,
+        created_by INTEGER,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (client_id) REFERENCES clients(id) ON DELETE CASCADE,
+        FOREIGN KEY (sale_id)   REFERENCES sales(id)   ON DELETE SET NULL,
+        FOREIGN KEY (created_by) REFERENCES users(id)
+      );
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_client_payments_client ON client_payments(client_id);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_client_payments_sale   ON client_payments(sale_id);');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_client_payments_batch  ON client_payments(batch_id);');
+  });
 
-  // Migration: client_id on client_payments enables on-account payments and server push
-  if (!columnExists('client_payments', 'client_id')) {
-    db.exec(`ALTER TABLE client_payments ADD COLUMN client_id INTEGER REFERENCES clients(id)`);
-  }
+  // Add remote_id to client_payments so mobile-originated ledger rows can be
+  // deduped if a sync pull is replayed. The source is the mobile's payment id
+  // stamped with a "mob-" prefix so it can't collide with future sources.
+  runMigration(5, 'add client_payments.remote_id for sync idempotency', () => {
+    if (!columnExists('client_payments', 'remote_id')) {
+      db.exec('ALTER TABLE client_payments ADD COLUMN remote_id TEXT');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_client_payments_remote_id ON client_payments(remote_id) WHERE remote_id IS NOT NULL');
+    }
+  });
+
+  // Client collection features: credit-block flag + last-contact metadata.
+  // Enables the "cash only" safeguard at checkout and the WhatsApp reminder
+  // flow (recording when a reminder was last sent so the shopkeeper doesn't
+  // nag the same customer twice in the same day).
+  runMigration(6, 'add credit_blocked + last_contact fields to clients', () => {
+    if (!columnExists('clients', 'credit_blocked')) {
+      db.exec('ALTER TABLE clients ADD COLUMN credit_blocked INTEGER DEFAULT 0');
+    }
+    if (!columnExists('clients', 'last_contact_note')) {
+      db.exec('ALTER TABLE clients ADD COLUMN last_contact_note TEXT');
+    }
+    if (!columnExists('clients', 'last_contact_at')) {
+      db.exec('ALTER TABLE clients ADD COLUMN last_contact_at DATETIME');
+    }
+  });
+
+  // Mobile-originated clients need a stable pointer to the mobile row so the
+  // desktop can dedupe replays and translate mobile sale.client_id references
+  // to the local desktop client id. Same pattern we already use for sales.
+  runMigration(7, 'add clients.remote_id for mobile-origin sync', () => {
+    if (!columnExists('clients', 'remote_id')) {
+      db.exec('ALTER TABLE clients ADD COLUMN remote_id TEXT');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_clients_remote_id ON clients(remote_id) WHERE remote_id IS NOT NULL');
+    }
+  });
+
+  // Supplier financial suite — mirrors the client ledger architecture:
+  //   * suppliers.remote_id for mobile-origin dedup
+  //   * supplier_payments table as the single source of truth for every
+  //     money movement on a supplier's balance (payments against purchases,
+  //     prepayments, opening balance, audit corrections)
+  //
+  // Balance semantics are inverted from clients:
+  //   negative balance = shop owes the supplier (AP)
+  //   positive balance = shop has prepayment credit with the supplier
+  runMigration(8, 'suppliers.remote_id + supplier_payments ledger', () => {
+    if (!columnExists('suppliers', 'remote_id')) {
+      db.exec('ALTER TABLE suppliers ADD COLUMN remote_id TEXT');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_suppliers_remote_id ON suppliers(remote_id) WHERE remote_id IS NOT NULL');
+    }
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS supplier_payments (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        supplier_id   INTEGER NOT NULL,
+        purchase_id   INTEGER,
+        amount        REAL    NOT NULL,
+        date          DATE    NOT NULL,
+        method        TEXT    DEFAULT 'cash',
+        notes         TEXT,
+        batch_id      TEXT,
+        created_by    INTEGER,
+        remote_id     TEXT,
+        created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (supplier_id) REFERENCES suppliers(id) ON DELETE CASCADE,
+        FOREIGN KEY (purchase_id) REFERENCES purchases(id) ON DELETE SET NULL
+      )
+    `);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sp_supplier ON supplier_payments(supplier_id)');
+    db.exec('CREATE INDEX IF NOT EXISTS idx_sp_purchase ON supplier_payments(purchase_id)');
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_sp_remote ON supplier_payments(remote_id) WHERE remote_id IS NOT NULL');
+  });
 
   console.log('Database initialized successfully!');
 };

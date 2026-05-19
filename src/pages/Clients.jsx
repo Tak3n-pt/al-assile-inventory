@@ -1,9 +1,11 @@
 import React, { useState, useEffect } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Users, Plus, Search, Filter, Edit2, Trash2, Phone, Mail, MapPin,
   ShoppingCart, DollarSign, AlertTriangle, ChevronDown, Eye, CreditCard,
-  FileText, FileCheck, FilePlus, Printer, Tag
+  FileText, FileCheck, FilePlus, Printer, Tag, Wallet, History, X, Settings,
+  ArrowDownCircle, ArrowUpCircle
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import ClientModal from '../components/ClientModal';
@@ -12,11 +14,13 @@ import DocumentGeneratorModal from '../components/documents/DocumentGeneratorMod
 import { useLanguage } from '../contexts/LanguageContext';
 import { useAuth } from '../contexts/AuthContext';
 import CustomSelect from '../components/CustomSelect';
+import useDataChanged from '../hooks/useDataChanged';
 
 const Clients = () => {
   const { t } = useLanguage();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const [searchParams, setSearchParams] = useSearchParams();
   const [clients, setClients] = useState([]);
   const [clientCategories, setClientCategories] = useState([]);
   const [sales, setSales] = useState([]);
@@ -34,10 +38,35 @@ const Clients = () => {
   const [editingClient, setEditingClient] = useState(null);
   const [editingSale, setEditingSale] = useState(null);
 
-  // Payment modal
+  // Per-sale payment modal (legacy)
   const [showPaymentModal, setShowPaymentModal] = useState(false);
   const [paymentSale, setPaymentSale] = useState(null);
   const [paymentAmount, setPaymentAmount] = useState('');
+
+  // Versement global (bulk client payment)
+  const [showVersementModal, setShowVersementModal] = useState(false);
+  const [versementClient, setVersementClient] = useState(null);
+  const [versementAmount, setVersementAmount] = useState('');
+  const [versementDate, setVersementDate] = useState(new Date().toISOString().split('T')[0]);
+  const [versementMethod, setVersementMethod] = useState('cash');
+  const [versementNotes, setVersementNotes] = useState('');
+  const [versementSubmitting, setVersementSubmitting] = useState(false);
+
+  // Balance adjustment (admin only)
+  const [showAdjustModal, setShowAdjustModal] = useState(false);
+  const [adjustClient, setAdjustClient] = useState(null);
+  const [adjustDelta, setAdjustDelta] = useState('');
+  const [adjustDirection, setAdjustDirection] = useState('credit'); // 'credit' | 'debit'
+  const [adjustReason, setAdjustReason] = useState('');
+  const [adjustSubmitting, setAdjustSubmitting] = useState(false);
+
+  // Payment history panel
+  const [historyClient, setHistoryClient] = useState(null);
+  const [historyEntries, setHistoryEntries] = useState([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [editingEntry, setEditingEntry] = useState(null);
+  const [editEntryAmount, setEditEntryAmount] = useState('');
+  const [editEntryNotes, setEditEntryNotes] = useState('');
 
   // Selected client for sales view
   const [selectedClient, setSelectedClient] = useState(null);
@@ -52,6 +81,30 @@ const Clients = () => {
     loadData();
     loadSettings();
   }, []);
+
+  // Dashboard can link here with ?filter=debtors to pre-apply the debt filter
+  // and ?open=<id> to auto-open that client's detail. Once consumed, strip
+  // the params so a refresh doesn't re-trigger with stale state.
+  useEffect(() => {
+    if (searchParams.get('filter') === 'debtors') {
+      setShowDebtOnly(true);
+    }
+  }, []); // only at mount
+  useEffect(() => {
+    const id = searchParams.get('open');
+    if (!id || clients.length === 0) return;
+    const found = clients.find(c => String(c.id) === String(id));
+    if (found) {
+      setSelectedClient(found);
+      // Consume the param so it doesn't re-fire on subsequent loadData() cycles
+      const next = new URLSearchParams(searchParams);
+      next.delete('open');
+      setSearchParams(next, { replace: true });
+    }
+  }, [clients]);
+
+  // Refresh when mobile sales sync in, payments are recorded, or balances change
+  useDataChanged(['clients', 'sales', 'products'], () => loadData());
 
   const loadSettings = async () => {
     try {
@@ -129,7 +182,7 @@ const Clients = () => {
     }
   };
 
-  // Sale CRUD
+  // Sale CRUD — uses atomic createComplete for new sales (header + items + stock + balance in one txn)
   const handleSaveSale = async ({ sale, items }) => {
     try {
       if (editingSale) {
@@ -138,22 +191,9 @@ const Clients = () => {
           throw new Error(updateResult.error || 'Failed to update sale');
         }
       } else {
-        // Create sale
-        const result = await window.api.sales.add(sale);
+        const result = await window.api.sales.createComplete({ ...sale, items });
         if (!result.success) {
           throw new Error(result.error || 'Failed to create sale');
-        }
-        const saleId = result.data.lastInsertRowid;
-        // Add items with rollback on failure
-        for (const item of items) {
-          const itemResult = await window.api.sales.addItem({
-            sale_id: saleId,
-            ...item
-          });
-          if (!itemResult.success) {
-            await window.api.sales.delete(saleId);
-            throw new Error(itemResult.error || 'Failed to add sale item');
-          }
         }
       }
       setShowSaleModal(false);
@@ -180,11 +220,13 @@ const Clients = () => {
     }
   };
 
-  // Payment handling
+  // Legacy per-sale payment handler (kept — used from the sales table)
   const handleAddPayment = async () => {
     if (!paymentSale || !paymentAmount) return;
     try {
-      const result = await window.api.sales.addPayment(paymentSale.id, parseFloat(paymentAmount));
+      const result = await window.api.sales.addPayment(paymentSale.id, parseFloat(paymentAmount), {
+        created_by: user?.id || null,
+      });
       if (!result.success) {
         throw new Error(result.error || 'Failed to add payment');
       }
@@ -198,13 +240,138 @@ const Clients = () => {
     }
   };
 
+  // Versement global — client drops money, allocated FIFO across unpaid sales,
+  // excess becomes on-account credit.
+  const openVersement = (client) => {
+    setVersementClient(client);
+    setVersementAmount('');
+    setVersementDate(new Date().toISOString().split('T')[0]);
+    setVersementMethod('cash');
+    setVersementNotes('');
+    setShowVersementModal(true);
+  };
+  const submitVersement = async () => {
+    const amt = parseFloat(versementAmount);
+    if (!versementClient || !amt || amt <= 0) return;
+    setVersementSubmitting(true);
+    try {
+      const result = await window.api.clients.recordPayment(versementClient.id, amt, {
+        date: versementDate,
+        method: versementMethod,
+        notes: versementNotes || null,
+        created_by: user?.id || null,
+      });
+      if (!result.success) throw new Error(result.error || 'Failed to record payment');
+      const { totalApplied, creditCarry } = result.data;
+      const msg = creditCarry > 0
+        ? `${totalApplied.toLocaleString()} DZD applied to debts, ${creditCarry.toLocaleString()} DZD kept as credit`
+        : `${amt.toLocaleString()} DZD applied to ${result.data.allocations.length} sale(s)`;
+      alert(msg);
+      setShowVersementModal(false);
+      loadData();
+    } catch (error) {
+      console.error('Versement error:', error);
+      alert(error.message || 'Error recording payment');
+    } finally {
+      setVersementSubmitting(false);
+    }
+  };
+
+  // Admin-only balance adjustment with a required reason.
+  const openAdjust = (client) => {
+    setAdjustClient(client);
+    setAdjustDelta('');
+    setAdjustDirection('credit');
+    setAdjustReason('');
+    setShowAdjustModal(true);
+  };
+  const submitAdjust = async () => {
+    const n = parseFloat(adjustDelta);
+    if (!adjustClient || !n || n <= 0 || !adjustReason.trim()) return;
+    const signedDelta = adjustDirection === 'credit' ? n : -n;
+    setAdjustSubmitting(true);
+    try {
+      const result = await window.api.clients.adjustBalance(
+        adjustClient.id,
+        signedDelta,
+        adjustReason.trim(),
+        user?.id
+      );
+      if (!result.success) throw new Error(result.error || 'Failed to adjust balance');
+      setShowAdjustModal(false);
+      loadData();
+    } catch (error) {
+      console.error('Adjust error:', error);
+      alert(error.message || 'Error adjusting balance');
+    } finally {
+      setAdjustSubmitting(false);
+    }
+  };
+
+  // Payment history panel
+  const openHistory = async (client) => {
+    setHistoryClient(client);
+    setHistoryLoading(true);
+    try {
+      const result = await window.api.clients.getPayments(client.id);
+      setHistoryEntries(result.success ? (result.data || []) : []);
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
+  const reloadHistory = async () => {
+    if (!historyClient) return;
+    const result = await window.api.clients.getPayments(historyClient.id);
+    setHistoryEntries(result.success ? (result.data || []) : []);
+  };
+  const beginEditEntry = (entry) => {
+    setEditingEntry(entry);
+    setEditEntryAmount(String(entry.amount));
+    setEditEntryNotes(entry.notes || '');
+  };
+  const submitEditEntry = async () => {
+    if (!editingEntry) return;
+    const amt = parseFloat(editEntryAmount);
+    // Reject NaN AND zero — "zero" a payment means delete it
+    if (!Number.isFinite(amt) || amt === 0) {
+      alert(t('amountMustBeNonZero'));
+      return;
+    }
+    try {
+      const result = await window.api.clients.updatePayment(editingEntry.id, {
+        amount: amt,
+        notes: editEntryNotes || null,
+      }, user?.id || null);
+      if (!result.success) throw new Error(result.error || 'Failed to edit payment');
+      setEditingEntry(null);
+      await reloadHistory();
+      loadData();
+    } catch (error) {
+      alert(error.message || 'Error editing payment');
+    }
+  };
+  const handleDeleteEntry = async (entry) => {
+    if (!window.confirm(t('confirmDeletePayment'))) return;
+    try {
+      const result = await window.api.clients.deletePayment(entry.id, user?.id || null);
+      if (!result.success) throw new Error(result.error || 'Failed to delete payment');
+      await reloadHistory();
+      loadData();
+    } catch (error) {
+      alert(error.message || 'Error deleting payment');
+    }
+  };
+
   // Filtering
   const filteredClients = clients.filter(client => {
-    const matchesSearch = client.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (client.phone && client.phone.includes(searchQuery)) ||
-      (client.email && client.email.toLowerCase().includes(searchQuery.toLowerCase())) ||
-      (client.category_name && client.category_name.toLowerCase().includes(searchQuery.toLowerCase()));
-    const matchesDebt = !showDebtOnly || client.outstanding_debt > 0 || client.balance < 0;
+    if (!client) return false;
+    const q = (searchQuery || '').toLowerCase();
+    const matchesSearch = !q ||
+      (client.name || '').toLowerCase().includes(q) ||
+      (client.phone || '').includes(searchQuery || '') ||
+      (client.email || '').toLowerCase().includes(q) ||
+      (client.category_name || '').toLowerCase().includes(q);
+    const matchesDebt = !showDebtOnly || (client.outstanding_debt || 0) > 0 || (client.balance || 0) < 0;
     const matchesCategory = categoryFilter === 'all' || String(client.category_id || '') === String(categoryFilter);
     return matchesSearch && matchesDebt && matchesCategory;
   });
@@ -218,7 +385,9 @@ const Clients = () => {
   ];
 
   const filteredSales = sales.filter(sale => {
-    const matchesSearch = sale.client_name?.toLowerCase().includes(searchQuery.toLowerCase());
+    if (!sale) return false;
+    const q = (searchQuery || '').toLowerCase();
+    const matchesSearch = !q || (sale.client_name || '').toLowerCase().includes(q);
     const matchesStatus = statusFilter === 'all' || sale.status === statusFilter;
     const matchesClient = !selectedClient || sale.client_id === selectedClient.id;
     return matchesSearch && matchesStatus && matchesClient;
@@ -425,7 +594,7 @@ const Clients = () => {
                       <div className="flex items-center gap-3">
                         <div className="w-12 h-12 rounded-xl bg-gradient-to-br from-cyan-500 to-blue-500 flex items-center justify-center">
                           <span className="text-white font-bold text-lg">
-                            {client.name.charAt(0).toUpperCase()}
+                            {(client.name || '?').charAt(0).toUpperCase()}
                           </span>
                         </div>
                         <div>
@@ -442,6 +611,52 @@ const Clients = () => {
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
+                        {client.phone && (client.balance || 0) < 0 && (
+                          <button
+                            onClick={async () => {
+                              const owed = Math.abs(client.balance || 0);
+                              const msg = t('whatsappReminderTemplate')
+                                .replace('{name}', client.name || '')
+                                .replace('{amount}', `${owed.toLocaleString()} DZD`);
+                              let phone = String(client.phone).replace(/[^0-9]/g, '');
+                              if (phone.startsWith('00')) phone = phone.slice(2);
+                              if (phone.startsWith('0'))  phone = '213' + phone.slice(1);
+                              const e164 = phone.startsWith('213') ? phone : '213' + phone;
+                              window.open(`https://wa.me/${e164}?text=${encodeURIComponent(msg)}`, '_blank');
+                              try {
+                                await window.api.clients.recordContact(client.id, t('reminderSentNote'));
+                                await loadData();
+                              } catch { /* offline / IPC hiccup — don't block the user */ }
+                            }}
+                            className="p-2 rounded-lg text-dark-400 hover:text-green-400 hover:bg-green-500/10 transition-colors"
+                            title={t('sendWhatsAppReminder')}
+                          >
+                            <span className="text-base leading-none">💬</span>
+                          </button>
+                        )}
+                        <button
+                          onClick={() => openVersement(client)}
+                          className="p-2 rounded-lg text-dark-400 hover:text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+                          title={t('recordPayment')}
+                        >
+                          <Wallet size={16} />
+                        </button>
+                        <button
+                          onClick={() => openHistory(client)}
+                          className="p-2 rounded-lg text-dark-400 hover:text-blue-400 hover:bg-blue-500/10 transition-colors"
+                          title={t('paymentHistory')}
+                        >
+                          <History size={16} />
+                        </button>
+                        {isAdmin && (
+                          <button
+                            onClick={() => openAdjust(client)}
+                            className="p-2 rounded-lg text-dark-400 hover:text-amber-400 hover:bg-amber-500/10 transition-colors"
+                            title={t('adjustBalance')}
+                          >
+                            <Settings size={16} />
+                          </button>
+                        )}
                         <button
                           onClick={() => {
                             setSelectedClient(client);
@@ -490,11 +705,21 @@ const Clients = () => {
                       )}
                     </div>
 
-                    <div className="flex items-center justify-between mt-4 pt-4 border-t border-dark-700/50">
+                    <div className="grid grid-cols-3 gap-3 mt-4 pt-4 border-t border-dark-700/50">
                       <div>
                         <p className="text-dark-500 text-xs">{t('totalPurchases')}</p>
                         <p className="text-white font-semibold">
                           {(client.total_purchases || 0).toLocaleString()} DZD
+                        </p>
+                      </div>
+                      <div>
+                        <p className="text-dark-500 text-xs">{t('balance')}</p>
+                        <p className={`font-semibold ${
+                          (client.balance || 0) < 0 ? 'text-red-400'
+                            : (client.balance || 0) > 0 ? 'text-emerald-400'
+                            : 'text-dark-400'
+                        }`}>
+                          {(client.balance || 0).toLocaleString()} DZD
                         </p>
                       </div>
                       <div className="text-right">
@@ -795,6 +1020,382 @@ const Clients = () => {
         sales={sales}
         settings={companySettings}
       />
+
+      {/* ==================== VERSEMENT GLOBAL MODAL ==================== */}
+      <AnimatePresence>
+        {showVersementModal && versementClient && (
+          <motion.div className="fixed inset-0 z-50 flex items-center justify-center"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowVersementModal(false)} />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-full max-w-md mx-4 bg-dark-900 rounded-2xl border border-dark-700 shadow-2xl"
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
+                    <Wallet className="w-5 h-5 text-emerald-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">{t('recordPayment')}</h2>
+                    <p className="text-xs text-dark-400">{versementClient.name}</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowVersementModal(false)} className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                {/* Current balance summary */}
+                <div className="p-4 rounded-xl bg-dark-800/50 space-y-2 text-sm">
+                  <div className="flex justify-between">
+                    <span className="text-dark-400">{t('currentBalance')}:</span>
+                    <span className={`font-semibold ${
+                      (versementClient.balance || 0) < 0 ? 'text-red-400'
+                      : (versementClient.balance || 0) > 0 ? 'text-emerald-400'
+                      : 'text-dark-400'
+                    }`}>
+                      {(versementClient.balance || 0).toLocaleString()} DZD
+                    </span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-dark-400">{t('outstandingDebt')}:</span>
+                    <span className="text-amber-400 font-semibold">
+                      {(versementClient.outstanding_debt || 0).toLocaleString()} DZD
+                    </span>
+                  </div>
+                </div>
+
+                {/* Amount */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('amount')} (DZD)</label>
+                  <input
+                    type="text" inputMode="decimal" autoFocus
+                    value={versementAmount}
+                    onChange={(e) => setVersementAmount(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white text-xl font-semibold text-right focus:outline-none focus:border-emerald-500"
+                  />
+                  <p className="text-xs text-dark-500 mt-2">
+                    {t('versementExplainer')}
+                  </p>
+                </div>
+
+                {/* Method */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('method')}</label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {['cash', 'bank'].map(m => (
+                      <button key={m}
+                        onClick={() => setVersementMethod(m)}
+                        className={`px-4 py-2 rounded-xl border text-sm font-medium transition-all ${
+                          versementMethod === m
+                            ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
+                            : 'bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600'
+                        }`}>
+                        {t(m)}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Date */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('date')}</label>
+                  <input type="date" value={versementDate} onChange={(e) => setVersementDate(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                {/* Notes */}
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('notes')} ({t('optional')})</label>
+                  <textarea rows={2} value={versementNotes} onChange={(e) => setVersementNotes(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button onClick={() => setShowVersementModal(false)} className="px-5 py-2.5 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800">
+                    {t('cancel')}
+                  </button>
+                  <button
+                    onClick={submitVersement}
+                    disabled={versementSubmitting || !versementAmount || parseFloat(versementAmount) <= 0}
+                    className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-green-500 text-white font-semibold hover:shadow-lg hover:shadow-emerald-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <Wallet size={18} />
+                    {versementSubmitting ? '...' : t('recordPayment')}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ==================== BALANCE ADJUSTMENT MODAL (admin) ==================== */}
+      <AnimatePresence>
+        {showAdjustModal && adjustClient && (
+          <motion.div className="fixed inset-0 z-50 flex items-center justify-center"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowAdjustModal(false)} />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-full max-w-md mx-4 bg-dark-900 rounded-2xl border border-dark-700 shadow-2xl"
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">
+                    <Settings className="w-5 h-5 text-amber-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">{t('adjustBalance')}</h2>
+                    <p className="text-xs text-dark-400">{adjustClient.name}</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowAdjustModal(false)} className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4">
+                <div className="p-3 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-300">
+                  <AlertTriangle size={14} className="inline mr-1" />
+                  {t('adjustWarning')}
+                </div>
+
+                {/* Direction */}
+                <div className="grid grid-cols-2 gap-2">
+                  <button onClick={() => setAdjustDirection('credit')}
+                    className={`flex flex-col items-center gap-1 px-3 py-4 rounded-xl border transition-all ${
+                      adjustDirection === 'credit'
+                        ? 'bg-emerald-500/10 border-emerald-500/50 text-emerald-400'
+                        : 'bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600'
+                    }`}>
+                    <ArrowDownCircle size={20} />
+                    <span className="text-xs font-semibold">{t('creditCustomer')}</span>
+                  </button>
+                  <button onClick={() => setAdjustDirection('debit')}
+                    className={`flex flex-col items-center gap-1 px-3 py-4 rounded-xl border transition-all ${
+                      adjustDirection === 'debit'
+                        ? 'bg-red-500/10 border-red-500/50 text-red-400'
+                        : 'bg-dark-800 border-dark-700 text-dark-400 hover:border-dark-600'
+                    }`}>
+                    <ArrowUpCircle size={20} />
+                    <span className="text-xs font-semibold">{t('debitCustomer')}</span>
+                  </button>
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('amount')} (DZD)</label>
+                  <input type="text" inputMode="decimal" autoFocus
+                    value={adjustDelta} onChange={(e) => setAdjustDelta(e.target.value)}
+                    placeholder="0"
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white text-xl font-semibold text-right focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">
+                    {t('reason')} <span className="text-red-400">*</span>
+                  </label>
+                  <textarea rows={3} value={adjustReason} onChange={(e) => setAdjustReason(e.target.value)}
+                    placeholder={t('reasonPlaceholder')}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-amber-500"
+                  />
+                </div>
+
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button onClick={() => setShowAdjustModal(false)} className="px-5 py-2.5 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800">
+                    {t('cancel')}
+                  </button>
+                  <button
+                    onClick={submitAdjust}
+                    disabled={adjustSubmitting || !adjustDelta || parseFloat(adjustDelta) <= 0 || !adjustReason.trim()}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-amber-500 to-orange-500 text-white font-semibold hover:shadow-lg hover:shadow-amber-500/25 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {adjustSubmitting ? '...' : t('apply')}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ==================== PAYMENT HISTORY MODAL ==================== */}
+      <AnimatePresence>
+        {historyClient && (
+          <motion.div className="fixed inset-0 z-50 flex items-center justify-center"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => { setHistoryClient(null); setEditingEntry(null); }} />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-full max-w-3xl mx-4 bg-dark-900 rounded-2xl border border-dark-700 shadow-2xl max-h-[85vh] overflow-hidden flex flex-col"
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-blue-500/20 flex items-center justify-center">
+                    <History className="w-5 h-5 text-blue-400" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">{t('paymentHistory')}</h2>
+                    <p className="text-xs text-dark-400">{historyClient.name}</p>
+                  </div>
+                </div>
+                <button onClick={() => { setHistoryClient(null); setEditingEntry(null); }} className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800">
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="flex-1 overflow-y-auto p-6">
+                {historyLoading ? (
+                  <div className="text-center text-dark-400 py-12">{t('loading')}</div>
+                ) : historyEntries.length === 0 ? (
+                  <div className="text-center text-dark-400 py-12">
+                    <History size={48} className="mx-auto mb-4 text-dark-600" />
+                    <p>{t('noPaymentsYet')}</p>
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {historyEntries.map(entry => {
+                      const isAdjustment = entry.method === 'adjustment';
+                      const isCredit = entry.method === 'credit_carry';
+                      const isReturn = entry.method === 'return';
+                      const amountSigned = entry.amount;
+                      // Orphan = tied to a sale that has since been deleted (sale_id SET NULL).
+                      // Non-adjustment/non-credit_carry rows with sale_date=null fit this shape.
+                      const isOrphan = !entry.sale_id && !isAdjustment && !isCredit && !isReturn;
+                      // Adjustment edits/deletes need admin
+                      const needsAdminToMutate = isAdjustment && !isAdmin;
+
+                      const label = isAdjustment
+                        ? (amountSigned >= 0 ? t('creditAdjustment') : t('debitAdjustment'))
+                        : isCredit
+                          ? t('onAccountCredit')
+                          : isReturn
+                            ? t('returnCredit')
+                            : entry.sale_id
+                              ? `${t('paymentForSale')} #${entry.sale_id}`
+                              : t('clientPayment');
+
+                      return (
+                        <div key={entry.id}
+                          className={`p-4 rounded-xl border flex items-center gap-4 ${
+                            isAdjustment
+                              ? 'bg-amber-500/5 border-amber-500/20'
+                              : isCredit
+                                ? 'bg-blue-500/5 border-blue-500/20'
+                                : isOrphan
+                                  ? 'bg-dark-800/30 border-dark-700/30 opacity-75'
+                                  : 'bg-dark-800/50 border-dark-700/50'
+                          }`}
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 mb-1">
+                              <span className="text-white font-medium text-sm">{label}</span>
+                              <span className="text-xs text-dark-500">{entry.method}</span>
+                              {isOrphan && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-dark-700 text-dark-400" title={t('saleDeleted')}>
+                                  {t('orphaned')}
+                                </span>
+                              )}
+                              {isAdjustment && (
+                                <span className="text-xs px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400" title={t('adminOnly')}>
+                                  {t('adminOnly')}
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-dark-400">
+                              {new Date(entry.date).toLocaleDateString()}
+                              {entry.created_by_name && ` · ${entry.created_by_name}`}
+                            </p>
+                            {entry.notes && <p className="text-xs text-dark-500 mt-1 italic truncate">{entry.notes}</p>}
+                          </div>
+                          <div className="text-right">
+                            <p className={`font-bold text-lg ${amountSigned < 0 ? 'text-red-400' : isCredit ? 'text-blue-400' : 'text-emerald-400'}`}>
+                              {amountSigned >= 0 ? '+' : ''}{amountSigned.toLocaleString()} DZD
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-1">
+                            <button
+                              onClick={() => beginEditEntry(entry)}
+                              disabled={needsAdminToMutate}
+                              className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={needsAdminToMutate ? t('adminOnly') : t('edit')}
+                            >
+                              <Edit2 size={14} />
+                            </button>
+                            <button
+                              onClick={() => handleDeleteEntry(entry)}
+                              disabled={needsAdminToMutate}
+                              className="p-2 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                              title={needsAdminToMutate ? t('adminOnly') : t('delete')}
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ==================== EDIT PAYMENT ENTRY MODAL ==================== */}
+      <AnimatePresence>
+        {editingEntry && (
+          <motion.div className="fixed inset-0 z-[60] flex items-center justify-center"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}>
+            <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={() => setEditingEntry(null)} />
+            <motion.div
+              initial={{ scale: 0.95, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.95, opacity: 0 }}
+              className="relative z-10 w-full max-w-md mx-4 bg-dark-900 rounded-2xl border border-dark-700 shadow-2xl"
+            >
+              <div className="flex items-center justify-between px-6 py-4 border-b border-dark-700">
+                <h2 className="text-lg font-semibold text-white">{t('editPayment')}</h2>
+                <button onClick={() => setEditingEntry(null)} className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800">
+                  <X size={20} />
+                </button>
+              </div>
+              <div className="p-6 space-y-4">
+                <div className="p-3 rounded-xl bg-blue-500/10 border border-blue-500/30 text-xs text-blue-300">
+                  {t('editPaymentHint')}
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('amount')} (DZD)</label>
+                  <input type="text" inputMode="decimal" autoFocus
+                    value={editEntryAmount} onChange={(e) => setEditEntryAmount(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white text-xl font-semibold text-right focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">{t('notes')}</label>
+                  <textarea rows={2} value={editEntryNotes} onChange={(e) => setEditEntryNotes(e.target.value)}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white focus:outline-none focus:border-blue-500"
+                  />
+                </div>
+                <div className="flex items-center justify-end gap-3 pt-2">
+                  <button onClick={() => setEditingEntry(null)} className="px-5 py-2.5 rounded-xl text-dark-300 hover:text-white hover:bg-dark-800">
+                    {t('cancel')}
+                  </button>
+                  <button onClick={submitEditEntry}
+                    className="px-5 py-2.5 rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 text-white font-semibold hover:shadow-lg transition-all"
+                  >
+                    {t('save')}
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 };

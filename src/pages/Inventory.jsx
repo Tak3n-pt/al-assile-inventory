@@ -10,6 +10,7 @@ import ProductImage from '../components/ProductImage';
 import { useLanguage } from '../contexts/LanguageContext';
 import { useNotification } from '../contexts/NotificationContext';
 import { useAuth } from '../contexts/AuthContext';
+import useDataChanged from '../hooks/useDataChanged';
 
 const Inventory = () => {
   const { t } = useLanguage();
@@ -48,6 +49,9 @@ const Inventory = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Refresh when sales deduct stock, returns restore it, batches are produced, or mobile syncs in
+  useDataChanged(['products', 'stock'], () => loadData());
 
   const loadData = async () => {
     setLoading(true);
@@ -144,7 +148,7 @@ const Inventory = () => {
         resaleStockModal.id,
         parseFloat(resaleStockData.quantity),
         parseFloat(resaleStockData.unit_cost) || 0,
-        resaleStockData.notes || t('resaleStockPurchase') || 'Resale stock purchase'
+        resaleStockData.notes || t('resaleStockPurchase')
       );
 
       if (result.success) {
@@ -361,7 +365,7 @@ const Inventory = () => {
                         <h3 className="text-white font-semibold">{product.name}</h3>
                         <p className="text-dark-500 text-sm">
                           {product.is_resale
-                            ? (t('resaleProduct') || 'Resale')
+                            ? t('resaleProduct')
                             : `${product.ingredient_count || 0} ${t('ingredients')}`}
                         </p>
                       </div>
@@ -379,7 +383,7 @@ const Inventory = () => {
                               });
                             }}
                             className="p-2 rounded-lg text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-                            title={t('addStock') || 'Add Stock'}
+                            title={t('addStock')}
                           >
                             <Plus size={16} />
                           </button>
@@ -416,12 +420,12 @@ const Inventory = () => {
                       <>
                         {isAdmin && (
                           <div className="text-center">
-                            <p className="text-dark-500 text-xs">{t('purchasePrice') || 'Purchase'}</p>
+                            <p className="text-dark-500 text-xs">{t('purchasePrice')}</p>
                             <p className="text-amber-400 font-medium">{formatCurrency(product.purchase_price || 0)}</p>
                           </div>
                         )}
                         <div className="text-right">
-                          <p className="text-dark-500 text-xs">{t('inStock') || 'In Stock'}</p>
+                          <p className="text-dark-500 text-xs">{t('inStock')}</p>
                           <p className="text-emerald-400 font-medium">{product.quantity || 0} {product.unit}</p>
                         </div>
                       </>
@@ -567,7 +571,7 @@ const Inventory = () => {
                   <ShoppingCart className="w-6 h-6 text-emerald-500" />
                 </div>
                 <div>
-                  <h3 className="text-lg font-semibold text-white">{t('addStock') || 'Add Stock'}</h3>
+                  <h3 className="text-lg font-semibold text-white">{t('addStock')}</h3>
                   <p className="text-dark-400 text-sm">{resaleStockModal.name}</p>
                 </div>
               </div>
@@ -575,7 +579,7 @@ const Inventory = () => {
               {/* Current Stock Info */}
               <div className="mb-4 p-3 rounded-xl bg-dark-800/50 border border-dark-700/50">
                 <div className="flex justify-between items-center">
-                  <span className="text-dark-400 text-sm">{t('currentStock') || 'Current Stock'}:</span>
+                  <span className="text-dark-400 text-sm">{t('currentStock')}:</span>
                   <span className="text-emerald-400 font-semibold">
                     {resaleStockModal.quantity || 0} {resaleStockModal.unit}
                   </span>
@@ -585,7 +589,7 @@ const Inventory = () => {
               <div className="space-y-4">
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('quantityToAdd') || 'Quantity to Add'} *
+                    {t('quantityToAdd')} *
                   </label>
                   <div className="relative">
                     <input
@@ -610,7 +614,7 @@ const Inventory = () => {
 
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('unitCostDZD') || 'Unit Cost (DZD)'}
+                    {t('unitCostDZD')}
                   </label>
                   <input
                     type="text"
@@ -634,7 +638,7 @@ const Inventory = () => {
                   <textarea
                     value={resaleStockData.notes}
                     onChange={(e) => setResaleStockData(prev => ({ ...prev, notes: e.target.value }))}
-                    placeholder={t('purchaseNotes') || 'Purchase notes...'}
+                    placeholder={t('purchaseNotes')}
                     rows={2}
                     className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors resize-none"
                   />
@@ -644,7 +648,7 @@ const Inventory = () => {
                 {resaleStockData.quantity && resaleStockData.unit_cost && (
                   <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
                     <div className="flex justify-between items-center">
-                      <span className="text-dark-400 text-sm">{t('totalCost') || 'Total Cost'}:</span>
+                      <span className="text-dark-400 text-sm">{t('totalCost')}:</span>
                       <span className="text-emerald-400 font-semibold">
                         {formatCurrency(parseFloat(resaleStockData.quantity) * parseFloat(resaleStockData.unit_cost))}
                       </span>
@@ -670,7 +674,7 @@ const Inventory = () => {
                   ) : (
                     <Plus size={16} />
                   )}
-                  {t('addStock') || 'Add Stock'}
+                  {t('addStock')}
                 </button>
               </div>
             </motion.div>

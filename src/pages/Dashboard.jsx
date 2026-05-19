@@ -17,6 +17,8 @@ import {
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
 import { useLanguage } from '../contexts/LanguageContext';
+import { useAuth } from '../contexts/AuthContext';
+import useDataChanged from '../hooks/useDataChanged';
 
 const formatCurrency = (value) => {
   return new Intl.NumberFormat('fr-DZ', {
@@ -75,17 +77,38 @@ const AlertCard = ({ title, count, description, icon: Icon, color, link }) => (
 );
 
 const Dashboard = () => {
-  const { t } = useLanguage();
+  const { t, language } = useLanguage();
+  const isRTL = language === 'ar';
+  const { user } = useAuth();
   const [loading, setLoading] = useState(true);
   const [stats, setStats] = useState(null);
   const [lowStockItems, setLowStockItems] = useState([]);
+  const [debtors, setDebtors] = useState([]);
+  const [auditOpen, setAuditOpen] = useState(false);
+  const [auditData, setAuditData] = useState(null);
+  const [auditBusy, setAuditBusy] = useState(false);
+
+  const runAudit = async () => {
+    setAuditBusy(true);
+    try {
+      const r = await window.api.clients.audit();
+      if (r.success) { setAuditData(r.data); setAuditOpen(true); }
+    } finally { setAuditBusy(false); }
+  };
+
+  const repairOne = async (clientId) => {
+    const r = await window.api.clients.repairBalance(clientId, user?.id);
+    if (r.success) { await runAudit(); loadData(); }
+    return r;
+  };
 
   const loadData = async () => {
     setLoading(true);
     try {
-      const [dashboardResult, lowStockResult] = await Promise.all([
+      const [dashboardResult, lowStockResult, debtorsResult] = await Promise.all([
         window.api.reports.getDashboardStats(),
-        window.api.reports.getLowStockItems()
+        window.api.reports.getLowStockItems(),
+        window.api.clients.getWithDebt()
       ]);
 
       if (dashboardResult.success) {
@@ -93,6 +116,9 @@ const Dashboard = () => {
       }
       if (lowStockResult.success) {
         setLowStockItems(lowStockResult.data);
+      }
+      if (debtorsResult.success) {
+        setDebtors(debtorsResult.data || []);
       }
     } catch (error) {
       console.error('Error loading dashboard:', error);
@@ -103,6 +129,9 @@ const Dashboard = () => {
   useEffect(() => {
     loadData();
   }, []);
+
+  // Dashboard shows cross-domain metrics, so refresh on any mutation
+  useDataChanged(['sales', 'clients', 'products', 'stock', 'expenses'], () => loadData());
 
   if (loading) {
     return (
@@ -130,17 +159,31 @@ const Dashboard = () => {
         icon={LayoutDashboard}
         gradient="from-blue-500 to-cyan-500"
         actions={
-          <button
-            onClick={loadData}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-xl
-                     bg-dark-800/50 border border-dark-700/50
-                     text-dark-300 font-medium text-sm
-                     hover:bg-dark-700 hover:text-white
-                     transition-all duration-300"
-          >
-            <RefreshCw size={18} />
-            {t('refresh')}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={runAudit}
+              disabled={auditBusy}
+              className="flex items-center gap-2 px-4 py-2.5 rounded-xl
+                       bg-amber-500/10 border border-amber-500/25
+                       text-amber-300 font-medium text-sm
+                       hover:bg-amber-500/20 transition-all duration-300"
+              title={t('balanceAudit')}
+            >
+              <AlertTriangle size={16} />
+              {t('balanceAudit')}
+            </button>
+            <button
+              onClick={loadData}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl
+                       bg-dark-800/50 border border-dark-700/50
+                       text-dark-300 font-medium text-sm
+                       hover:bg-dark-700 hover:text-white
+                       transition-all duration-300"
+            >
+              <RefreshCw size={18} />
+              {t('refresh')}
+            </button>
+          </div>
         }
       />
 
@@ -277,28 +320,153 @@ const Dashboard = () => {
             </div>
           )}
 
-          {outstanding?.fromClients > 0 && (
-            <div className="flex items-center gap-4 p-4 rounded-xl bg-cyan-500/10 border border-cyan-500/20">
-              <div className="w-10 h-10 rounded-xl bg-cyan-500/20 flex items-center justify-center">
-                <DollarSign className="w-5 h-5 text-cyan-400" />
-              </div>
-              <div className="flex-1">
-                <p className="text-sm font-semibold text-cyan-200">{t('outstandingPayments')}</p>
-                <p className="text-xs text-cyan-300/70">
-                  {formatCurrency(outstanding.fromClients)} {t('pendingFromClients')}
+          {debtors.length > 0 && (() => {
+            const totalOwed = debtors.reduce((sum, d) => sum + Math.max(0, -(d.balance || 0)), 0);
+            const daysSince = (iso) => {
+              if (!iso) return null;
+              const ms = Date.now() - new Date(iso).getTime();
+              return Math.floor(ms / (1000 * 60 * 60 * 24));
+            };
+            // Human-friendly time phrasing — reads like a reminder, not a log line.
+            const timeLabel = (days) => {
+              if (days == null) return t('noActivityYet');
+              if (days === 0) return t('activeToday');
+              if (days < 7) return `${t('sinceLastVisit')}: ${days === 1 ? t('oneDay') : `${days} ${t('days')}`}`;
+              if (days < 30) {
+                const w = Math.floor(days / 7);
+                return `${t('sinceLastVisit')}: ${w === 1 ? t('oneWeek') : `${w} ${t('weeks')}`}`;
+              }
+              const m = Math.floor(days / 30);
+              return `${t('sinceLastVisit')}: ${m === 1 ? t('oneMonth') : `${m} ${t('months')}`}`;
+            };
+            const initials = (name) => (name || '?').trim().split(/\s+/).map(w => w[0]).slice(0, 2).join('').toUpperCase();
+            // Aging buckets — tier each debtor so the shopkeeper sees which ones
+            // need action today versus which are routine. null activity = treat
+            // as cold (we can't tell, assume the worst).
+            const tierOf = (days) => {
+              if (days == null || days >= 90) return 'collection';
+              if (days >= 30) return 'cold';
+              if (days >= 7)  return 'followup';
+              return 'fresh';
+            };
+            const tierMeta = {
+              fresh:      { color: '#34d399', bg: 'rgba(16,185,129,0.12)',  border: 'rgba(16,185,129,0.3)',  label: t('tierFresh') },
+              followup:   { color: '#fbbf24', bg: 'rgba(245,158,11,0.15)',  border: 'rgba(245,158,11,0.3)',  label: t('tierFollowUp') },
+              cold:       { color: '#fb923c', bg: 'rgba(249,115,22,0.15)',  border: 'rgba(249,115,22,0.35)', label: t('tierCold') },
+              collection: { color: '#f87171', bg: 'rgba(239,68,68,0.15)',   border: 'rgba(239,68,68,0.35)',  label: t('tierCollection') },
+            };
+            const buckets = { fresh: 0, followup: 0, cold: 0, collection: 0 };
+            for (const d of debtors) buckets[tierOf(daysSince(d.last_activity_at))]++;
+            const top = debtors.slice(0, 5);
+            return (
+              <div className="rounded-2xl overflow-hidden"
+                   style={{ background: 'linear-gradient(135deg, rgba(245,158,11,0.08), rgba(239,68,68,0.06))', border: '1px solid rgba(245,158,11,0.25)' }}
+                   dir={isRTL ? 'rtl' : 'ltr'}>
+                {/* Header: big total with clear call to attention */}
+                <div className="flex items-center gap-4 p-5">
+                  <div className="w-14 h-14 rounded-2xl flex items-center justify-center flex-shrink-0"
+                       style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.3)' }}>
+                    <Wallet className="w-7 h-7" style={{ color: '#fbbf24' }} />
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <p className="text-xs font-semibold uppercase tracking-wider" style={{ color: '#d97706' }}>
+                      {t('debtsToCollect')}
+                    </p>
+                    <p className="text-2xl font-bold mt-0.5" style={{ color: '#fbbf24' }} dir="ltr">
+                      {formatCurrency(totalOwed)}
+                    </p>
+                    <p className="text-xs mt-0.5" style={{ color: '#a16207' }}>
+                      {debtors.length === 1
+                        ? t('fromOneClient')
+                        : `${t('fromNClientsPrefix')} ${debtors.length} ${t('fromNClientsSuffix')}`}
+                    </p>
+                  </div>
+                  <Link
+                    to="/clients?filter=debtors"
+                    className="flex items-center gap-2 px-4 py-2.5 rounded-xl text-sm font-semibold transition-colors flex-shrink-0"
+                    style={{ background: 'rgba(245,158,11,0.15)', border: '1px solid rgba(245,158,11,0.3)', color: '#fbbf24' }}
+                  >
+                    {t('reviewAll')}
+                    <ArrowRight size={16} style={{ transform: isRTL ? 'scaleX(-1)' : 'none' }} />
+                  </Link>
+                </div>
+
+                {/* Aging-bucket summary — one-glance health check across the whole
+                    debtor pool. Only tiers with count > 0 show, so the strip
+                    stays calm when things are calm. */}
+                <div className="px-5 pb-3 flex flex-wrap gap-2">
+                  {['fresh', 'followup', 'cold', 'collection'].map(tier => {
+                    const n = buckets[tier];
+                    if (!n) return null;
+                    const m = tierMeta[tier];
+                    return (
+                      <div
+                        key={tier}
+                        className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-semibold"
+                        style={{ background: m.bg, border: `1px solid ${m.border}`, color: m.color }}
+                      >
+                        <span className="w-1.5 h-1.5 rounded-full" style={{ background: m.color }} />
+                        <span dir="ltr">{n}</span>
+                        <span>{m.label}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Debtor cards — bigger, glanceable, each tappable */}
+                <div className="px-3 pb-3 pt-1 grid gap-2">
+                  {top.map(d => {
+                    const owed = Math.max(0, -(d.balance || 0));
+                    const days = daysSince(d.last_activity_at);
+                    const tier = tierOf(days);
+                    const m = tierMeta[tier];
+                    return (
+                      <Link
+                        key={d.id}
+                        to={`/clients?open=${d.id}`}
+                        className="flex items-center gap-3 px-3 py-3 rounded-xl transition-colors"
+                        style={{ background: 'rgba(255,255,255,0.02)', border: `1px solid ${m.border}` }}
+                        onMouseEnter={e => e.currentTarget.style.background = 'rgba(255,255,255,0.04)'}
+                        onMouseLeave={e => e.currentTarget.style.background = 'rgba(255,255,255,0.02)'}
+                      >
+                        {/* Avatar with tier-colored ring */}
+                        <div className="w-11 h-11 rounded-full flex items-center justify-center flex-shrink-0 text-sm font-bold"
+                             style={{ background: m.bg, color: m.color, border: `1px solid ${m.border}` }}>
+                          {initials(d.name)}
+                        </div>
+                        {/* Name + tier pill + time */}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-0.5">
+                            <p className="text-sm font-semibold text-white truncate">{d.name}</p>
+                            {d.credit_blocked ? (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full font-bold uppercase tracking-wide"
+                                    style={{ background: 'rgba(239,68,68,0.15)', color: '#f87171', border: '1px solid rgba(239,68,68,0.3)' }}>
+                                {t('cashOnly')}
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="text-xs" style={{ color: m.color, opacity: 0.9 }}>
+                            {timeLabel(days)}
+                          </p>
+                        </div>
+                        {/* Amount — LTR direction so digits read naturally in Arabic */}
+                        <p className="text-base font-bold flex-shrink-0" style={{ color: m.color }} dir="ltr">
+                          {formatCurrency(owed)}
+                        </p>
+                      </Link>
+                    );
+                  })}
+                </div>
+
+                {/* Subtle hint at the bottom of card */}
+                <p className="text-[11px] text-center pb-3" style={{ color: '#a16207' }}>
+                  {t('tapAnyClientForDetails')}
                 </p>
               </div>
-              <Link
-                to="/clients"
-                className="flex items-center gap-2 px-4 py-2 rounded-lg bg-cyan-500/20 text-cyan-400 text-sm font-medium hover:bg-cyan-500/30 transition-colors"
-              >
-                {t('viewClients')}
-                <ArrowRight size={16} />
-              </Link>
-            </div>
-          )}
+            );
+          })()}
 
-          {!stock?.low_stock_count && !outstanding?.pendingPayrollCount && !outstanding?.fromClients && (
+          {!stock?.low_stock_count && !outstanding?.pendingPayrollCount && debtors.length === 0 && (
             <div className="flex items-center gap-4 p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/20">
               <div className="w-10 h-10 rounded-xl bg-emerald-500/20 flex items-center justify-center">
                 <TrendingUp className="w-5 h-5 text-emerald-400" />
@@ -313,6 +481,80 @@ const Dashboard = () => {
           )}
         </div>
       </motion.div>
+
+      {/* Audit modal — lists drifts and lets admin one-click repair */}
+      {auditOpen && auditData && (
+        <div
+          className="fixed inset-0 z-50 flex items-start justify-center p-6"
+          style={{ background: 'rgba(0,0,0,0.75)', backdropFilter: 'blur(4px)' }}
+          onClick={e => { if (e.target === e.currentTarget) setAuditOpen(false); }}
+        >
+          <div className="w-full max-w-2xl mt-12 rounded-2xl overflow-hidden"
+               style={{ background: '#0d1120', border: '1px solid rgba(245,158,11,0.25)' }}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-amber-500/15">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl flex items-center justify-center"
+                     style={{ background: 'rgba(245,158,11,0.15)' }}>
+                  <AlertTriangle className="w-5 h-5 text-amber-400" />
+                </div>
+                <div>
+                  <h2 className="text-lg font-bold text-white">{t('balanceAudit')}</h2>
+                  <p className="text-xs text-amber-300/70">
+                    {auditData.total_drift_count === 0
+                      ? t('allBalancesMatch')
+                      : `${auditData.total_drift_count} ${t('driftsFound')}`}
+                  </p>
+                </div>
+              </div>
+              <button onClick={() => setAuditOpen(false)}
+                      className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800">
+                <span className="text-xl">×</span>
+              </button>
+            </div>
+            <div className="p-5 max-h-[60vh] overflow-y-auto">
+              {auditData.drifts.length === 0 ? (
+                <div className="text-center py-10">
+                  <div className="w-14 h-14 rounded-2xl bg-emerald-500/10 border border-emerald-500/25 flex items-center justify-center mx-auto mb-3">
+                    <TrendingUp className="w-7 h-7 text-emerald-400" />
+                  </div>
+                  <p className="text-emerald-200 font-medium">{t('allBalancesMatch')}</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {auditData.drifts.map(d => (
+                    <div key={d.id}
+                         className="flex items-center justify-between p-3 rounded-xl"
+                         style={{ background: 'rgba(239,68,68,0.07)', border: '1px solid rgba(239,68,68,0.2)' }}>
+                      <div className="flex-1 min-w-0">
+                        <p className="font-semibold text-white truncate">{d.name}</p>
+                        <p className="text-xs text-dark-400 mt-0.5">
+                          <span className="text-red-400">{t('storedBalance')}: {formatCurrency(d.stored_balance)}</span>
+                          <span className="mx-2 text-dark-500">→</span>
+                          <span className="text-emerald-400">{t('expectedBalance')}: {formatCurrency(d.expected_balance)}</span>
+                        </p>
+                      </div>
+                      {user?.role === 'admin' ? (
+                        <button
+                          onClick={async () => {
+                            if (!window.confirm(`${t('confirmFixBalance')}\n${formatCurrency(d.stored_balance)} → ${formatCurrency(d.expected_balance)}`)) return;
+                            const r = await repairOne(d.id);
+                            if (!r.success) alert(r.error || t('repairFailed'));
+                          }}
+                          className="px-4 py-2 rounded-lg bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 text-sm font-semibold hover:bg-emerald-500/25 transition-colors"
+                        >
+                          {t('fixBalance')}
+                        </button>
+                      ) : (
+                        <span className="px-3 py-1.5 rounded-lg bg-dark-800/50 text-dark-500 text-xs">{t('adminOnly')}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

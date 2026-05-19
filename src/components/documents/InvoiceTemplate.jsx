@@ -1,21 +1,5 @@
 import React, { forwardRef } from 'react';
-
-const formatCurrency = (value) => {
-  return new Intl.NumberFormat('fr-DZ', {
-    style: 'decimal',
-    minimumFractionDigits: 2,
-    maximumFractionDigits: 2
-  }).format(value || 0);
-};
-
-const formatDate = (dateString) => {
-  const date = new Date(dateString);
-  return date.toLocaleDateString('fr-DZ', {
-    day: '2-digit',
-    month: '2-digit',
-    year: 'numeric'
-  });
-};
+import { formatCurrency, formatDate, amountInWords, computeDocumentTotals } from '../../lib/format';
 
 const InvoiceTemplate = forwardRef(({ data, settings, language = 'fr' }, ref) => {
   const {
@@ -32,49 +16,10 @@ const InvoiceTemplate = forwardRef(({ data, settings, language = 'fr' }, ref) =>
   } = data;
 
   const tvaRate = parseFloat(settings?.tva_rate || 19);
-  const tvaAmount = subtotal * (tvaRate / 100);
-  const totalTTC = subtotal + tvaAmount - discount;
-  const remaining = totalTTC - paidAmount;
-
-  // Number to words in French
-  const numberToWordsFR = (num) => {
-    const units = ['', 'un', 'deux', 'trois', 'quatre', 'cinq', 'six', 'sept', 'huit', 'neuf'];
-    const teens = ['dix', 'onze', 'douze', 'treize', 'quatorze', 'quinze', 'seize', 'dix-sept', 'dix-huit', 'dix-neuf'];
-    const tens = ['', '', 'vingt', 'trente', 'quarante', 'cinquante', 'soixante', 'soixante-dix', 'quatre-vingt', 'quatre-vingt-dix'];
-
-    if (num === 0) return 'zéro';
-    if (num < 10) return units[num];
-    if (num < 20) return teens[num - 10];
-    if (num < 100) {
-      const t = Math.floor(num / 10);
-      const u = num % 10;
-      if (t === 7 || t === 9) {
-        return tens[t - 1] + '-' + teens[u];
-      }
-      return tens[t] + (u ? '-' + units[u] : '');
-    }
-    if (num < 1000) {
-      const h = Math.floor(num / 100);
-      const r = num % 100;
-      return (h === 1 ? 'cent' : units[h] + ' cent') + (r ? ' ' + numberToWordsFR(r) : '');
-    }
-    if (num < 1000000) {
-      const th = Math.floor(num / 1000);
-      const r = num % 1000;
-      return (th === 1 ? 'mille' : numberToWordsFR(th) + ' mille') + (r ? ' ' + numberToWordsFR(r) : '');
-    }
-    return num.toLocaleString('fr-FR');
-  };
-
-  const amountInWords = (amount) => {
-    const intPart = Math.floor(amount);
-    const decPart = Math.round((amount - intPart) * 100);
-    let result = numberToWordsFR(intPart) + ' dinars';
-    if (decPart > 0) {
-      result += ' et ' + numberToWordsFR(decPart) + ' centimes';
-    }
-    return result.charAt(0).toUpperCase() + result.slice(1);
-  };
+  const totals = computeDocumentTotals({ subtotal, discount, tvaRate, paidAmount });
+  const tvaAmount = totals.tvaAmount;
+  const totalTTC = totals.totalTTC;
+  const remaining = totals.remaining;
 
   return (
     <div

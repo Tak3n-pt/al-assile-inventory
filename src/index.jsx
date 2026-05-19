@@ -7,8 +7,9 @@ import { AuthProvider } from './contexts/AuthContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import './styles/index.css';
 
-// Fix: Electron frameless window loses keyboard focus after native dialogs
-// Patch window.confirm AND window.alert to restore focus after dialog closes
+// Fix: Electron frameless window loses keyboard focus after native dialogs.
+// Only restore focus after the specific events that cause loss, not on every keystroke
+// (which was interfering with NumLock / keyboard state).
 const originalConfirm = window.confirm;
 window.confirm = function(message) {
   const result = originalConfirm.call(window, message);
@@ -22,24 +23,12 @@ window.alert = function(message) {
   setTimeout(() => window.focus(), 50);
 };
 
-// Fix: Aggressive focus restoration for frameless Electron windows.
-// The webContents can silently lose keyboard focus from:
-// - Clicking the drag region (title bar)
-// - Native dialogs (confirm/alert/print)
-// - CustomSelect dropdowns stealing focus
-// - Auto-sync fetch() calls
-// This ensures clicking ANYWHERE in the app restores keyboard input.
-document.addEventListener('mousedown', () => {
-  setTimeout(() => window.focus(), 10);
-});
-
-// Also restore focus on any keydown attempt (catches the "stuck" state)
-document.addEventListener('keydown', (e) => {
-  const active = document.activeElement;
-  const isInput = active && ['INPUT', 'TEXTAREA'].includes(active.tagName);
-  // If user is trying to type but focus is lost (body or non-input has focus)
-  if (!isInput && e.key.length === 1 && !e.ctrlKey && !e.altKey && !e.metaKey) {
-    window.focus();
+// Restore focus only when clicking the title bar drag region (which steals focus).
+// Clicks inside the app content don't need this.
+document.addEventListener('mousedown', (e) => {
+  const titleBar = e.target.closest('.title-bar');
+  if (titleBar) {
+    setTimeout(() => window.focus(), 50);
   }
 });
 

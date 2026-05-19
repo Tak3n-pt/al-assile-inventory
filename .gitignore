@@ -8,6 +8,8 @@ dist-electron/
 # Database
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 
 # Environment
 .env
@@ -25,3 +27,6 @@ Thumbs.db
 *.log
 npm-debug.log*
 nul
+
+# Stray duplicate of electron/preload.cjs left over in repo root
+/preload.cjs

@@ -62,6 +62,8 @@ const productsQueries = (db) => ({
     `).get(id);
   },
 
+  // Search visible (active) products only — deactivated products should not be sellable
+  // through the POS, even by accidental barcode substring match.
   searchProducts: (query) => {
     return db.prepare(`
       SELECT
@@ -69,11 +71,15 @@ const productsQueries = (db) => ({
         (SELECT COUNT(*) FROM product_recipes WHERE product_id = p.id) as ingredient_count,
         (SELECT COALESCE(SUM(quantity_produced), 0) FROM production_batches WHERE product_id = p.id) as total_produced
       FROM products p
-      WHERE p.name LIKE ? OR p.description LIKE ? OR p.barcode LIKE ?
+      WHERE p.is_active = 1
+        AND (p.name LIKE ? OR p.description LIKE ? OR p.barcode LIKE ?)
       ORDER BY p.name
     `).all(`%${query}%`, `%${query}%`, `%${query}%`);
   },
 
+  // Exact barcode match. Filters inactive products (see above) and tie-breaks by id
+  // so that if two products share the same barcode (admin error), scans are deterministic
+  // instead of returning whichever row SQLite happens to surface first.
   getProductByBarcode: (barcode) => {
     return db.prepare(`
       SELECT
@@ -81,8 +87,30 @@ const productsQueries = (db) => ({
         (SELECT COUNT(*) FROM product_recipes WHERE product_id = p.id) as ingredient_count,
         (SELECT COALESCE(SUM(quantity_produced), 0) FROM production_batches WHERE product_id = p.id) as total_produced
       FROM products p
-      WHERE p.barcode = ?
+      WHERE p.barcode = ? AND p.is_active = 1
+      ORDER BY p.id
+      LIMIT 1
     `).get(barcode);
+  },
+
+  // Fallback for scanner/admin mismatches on EAN padding: "12345" vs "0000012345".
+  // Strips leading zeros from both sides and compares. Still filters is_active.
+  getProductByBarcodeNormalized: (barcode) => {
+    const stripped = String(barcode).replace(/^0+/, '');
+    if (!stripped) return undefined;
+    return db.prepare(`
+      SELECT
+        p.*,
+        (SELECT COUNT(*) FROM product_recipes WHERE product_id = p.id) as ingredient_count,
+        (SELECT COALESCE(SUM(quantity_produced), 0) FROM production_batches WHERE product_id = p.id) as total_produced
+      FROM products p
+      WHERE p.is_active = 1
+        AND p.barcode IS NOT NULL
+        AND p.barcode != ''
+        AND REPLACE(LTRIM(REPLACE(p.barcode, '0', ' ')), ' ', '0') = ?
+      ORDER BY p.id
+      LIMIT 1
+    `).get(stripped);
   },
 
   getFavoriteProducts: () => {
@@ -565,57 +593,52 @@ const productsQueries = (db) => ({
   },
 
   deleteBatch: (id) => {
-    // Get batch details before deletion
-    const batch = db.prepare(`SELECT * FROM production_batches WHERE id = ?`).get(id);
-    if (!batch) throw new Error('Batch not found');
+    return db.transaction(() => {
+      const batch = db.prepare(`SELECT * FROM production_batches WHERE id = ?`).get(id);
+      if (!batch) throw new Error('Batch not found');
 
-    const product = db.prepare(`SELECT * FROM products WHERE id = ?`).get(batch.product_id);
+      const product = db.prepare(`SELECT * FROM products WHERE id = ?`).get(batch.product_id);
 
-    // Get recipe to restore stock with unit conversion
-    const recipe = db.prepare(`
-      SELECT
-        pr.stock_item_id,
-        pr.quantity_needed,
-        pr.unit as recipe_unit,
-        s.unit as stock_unit
-      FROM product_recipes pr
-      LEFT JOIN stock s ON pr.stock_item_id = s.id
-      WHERE pr.product_id = ?
-    `).all(batch.product_id);
+      const recipe = db.prepare(`
+        SELECT
+          pr.stock_item_id,
+          pr.quantity_needed,
+          pr.unit as recipe_unit,
+          s.unit as stock_unit
+        FROM product_recipes pr
+        LEFT JOIN stock s ON pr.stock_item_id = s.id
+        WHERE pr.product_id = ?
+      `).all(batch.product_id);
 
-    // Restore stock for each ingredient
-    const stockRestoreStmt = db.prepare(`
-      UPDATE stock SET quantity = quantity + ? WHERE id = ?
-    `);
+      const stockRestoreStmt = db.prepare(`
+        UPDATE stock SET quantity = quantity + ? WHERE id = ?
+      `);
+      const transactionStmt = db.prepare(`
+        INSERT INTO stock_transactions (stock_id, type, quantity, notes, reference_type, reference_id)
+        VALUES (?, 'in', ?, ?, 'batch_delete', ?)
+      `);
 
-    const transactionStmt = db.prepare(`
-      INSERT INTO stock_transactions (stock_id, type, quantity, notes, reference_type, reference_id)
-      VALUES (?, 'in', ?, ?, 'batch_delete', ?)
-    `);
+      for (const item of recipe) {
+        const recipeUnit = item.recipe_unit || item.stock_unit;
+        const restoreQtyInStockUnit = convertUnit(
+          item.quantity_needed * batch.quantity_produced,
+          recipeUnit,
+          item.stock_unit
+        );
+        stockRestoreStmt.run(restoreQtyInStockUnit, item.stock_item_id);
+        transactionStmt.run(
+          item.stock_item_id,
+          restoreQtyInStockUnit,
+          `Batch deleted: ${product?.name || 'Unknown'} x${batch.quantity_produced}`,
+          id
+        );
+      }
 
-    for (const item of recipe) {
-      // Convert quantity to stock unit before restoring
-      const recipeUnit = item.recipe_unit || item.stock_unit;
-      const restoreQtyInStockUnit = convertUnit(
-        item.quantity_needed * batch.quantity_produced,
-        recipeUnit,
-        item.stock_unit
-      );
-      stockRestoreStmt.run(restoreQtyInStockUnit, item.stock_item_id);
-      transactionStmt.run(
-        item.stock_item_id,
-        restoreQtyInStockUnit,
-        `Batch deleted: ${product?.name || 'Unknown'} x${batch.quantity_produced}`,
-        id
-      );
-    }
+      db.prepare(`UPDATE products SET quantity = quantity - ? WHERE id = ?`)
+        .run(batch.quantity_produced, batch.product_id);
 
-    // Reduce product quantity
-    db.prepare(`UPDATE products SET quantity = quantity - ? WHERE id = ?`)
-      .run(batch.quantity_produced, batch.product_id);
-
-    // Delete the batch record
-    return db.prepare(`DELETE FROM production_batches WHERE id = ?`).run(id);
+      return db.prepare(`DELETE FROM production_batches WHERE id = ?`).run(id);
+    })();
   },
 
   // ============================================
@@ -716,9 +739,11 @@ const productsQueries = (db) => ({
   getProductStats: () => {
     const now = new Date();
     const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const mNum = now.getMonth() + 1;
+    const month = String(mNum).padStart(2, '0');
     const startOfMonth = `${year}-${month}-01`;
-    const endOfMonth = `${year}-${month}-31`;
+    const lastDay = new Date(year, mNum, 0).getDate();
+    const endOfMonth = `${year}-${month}-${String(lastDay).padStart(2, '0')}`;
 
     const totalStats = db.prepare(`
       SELECT
@@ -758,7 +783,8 @@ const productsQueries = (db) => ({
     const params = [];
     if (year && month) {
       const startDate = `${year}-${String(month).padStart(2, '0')}-01`;
-      const endDate = `${year}-${String(month).padStart(2, '0')}-31`;
+      const lastDay = new Date(parseInt(year), parseInt(month), 0).getDate();
+      const endDate = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
       query += ` WHERE pb.date BETWEEN ? AND ?`;
       params.push(startDate, endDate);
     } else if (year) {

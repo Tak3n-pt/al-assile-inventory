@@ -96,6 +96,14 @@ contextBridge.exposeInMainWorld('api', {
     updateBalance: (id, amount) => ipcRenderer.invoke('suppliers:updateBalance', id, amount),
     delete: (id) => ipcRenderer.invoke('suppliers:delete', id),
     getStats: () => ipcRenderer.invoke('suppliers:getStats'),
+    // Supplier payment ledger (mirrors the clients.recordPayment family)
+    recordPayment: (data) => ipcRenderer.invoke('suppliers:recordPayment', data),
+    recordVersement: (supplierId, amount, opts) => ipcRenderer.invoke('suppliers:recordVersement', supplierId, amount, opts),
+    getPayments: (supplierId) => ipcRenderer.invoke('suppliers:getPayments', supplierId),
+    deletePayment: (id, userId) => ipcRenderer.invoke('suppliers:deletePayment', id, userId),
+    updatePayment: (id, data, userId) => ipcRenderer.invoke('suppliers:updatePayment', id, data, userId),
+    audit: () => ipcRenderer.invoke('suppliers:audit'),
+    repairBalance: (id, userId) => ipcRenderer.invoke('suppliers:repairBalance', id, userId),
   },
 
   // ============================================
@@ -173,9 +181,18 @@ contextBridge.exposeInMainWorld('api', {
     getWithDebt: () => ipcRenderer.invoke('clients:getWithDebt'),
     add: (data) => ipcRenderer.invoke('clients:add', data),
     update: (id, data) => ipcRenderer.invoke('clients:update', id, data),
-    updateBalance: (id, amount) => ipcRenderer.invoke('clients:updateBalance', id, amount),
+    recordContact: (id, note) => ipcRenderer.invoke('clients:recordContact', id, note),
+    audit: () => ipcRenderer.invoke('clients:audit'),
+    repairBalance: (id, userId) => ipcRenderer.invoke('clients:repairBalance', id, userId),
     delete: (id) => ipcRenderer.invoke('clients:delete', id),
     getStats: () => ipcRenderer.invoke('clients:getStats'),
+    // Payment ledger — versement global + edit/delete + admin balance adjustment.
+    // Balance changes go through these methods ONLY (no direct updateBalance).
+    recordPayment: (clientId, amount, opts) => ipcRenderer.invoke('clients:recordPayment', clientId, amount, opts),
+    getPayments: (clientId) => ipcRenderer.invoke('clients:getPayments', clientId),
+    updatePayment: (id, data, userId) => ipcRenderer.invoke('clients:updatePayment', id, data, userId),
+    deletePayment: (id, userId) => ipcRenderer.invoke('clients:deletePayment', id, userId),
+    adjustBalance: (clientId, delta, reason, userId) => ipcRenderer.invoke('clients:adjustBalance', clientId, delta, reason, userId),
   },
 
   // ============================================
@@ -188,9 +205,11 @@ contextBridge.exposeInMainWorld('api', {
     getByStatus: (status) => ipcRenderer.invoke('sales:getByStatus', status),
     getByDateRange: (startDate, endDate) => ipcRenderer.invoke('sales:getByDateRange', startDate, endDate),
     getUnpaid: () => ipcRenderer.invoke('sales:getUnpaid'),
-    add: (data) => ipcRenderer.invoke('sales:add', data),
+    // Atomic cart checkout: pass { ..., items: [{product_id, quantity, unit_price, total?}] }
+    // This is the single entry point for creating sales — no separate add()+addItem() flow.
+    createComplete: (data) => ipcRenderer.invoke('sales:createComplete', data),
     update: (id, data) => ipcRenderer.invoke('sales:update', id, data),
-    addPayment: (id, amount) => ipcRenderer.invoke('sales:addPayment', id, amount),
+    addPayment: (id, amount, opts) => ipcRenderer.invoke('sales:addPayment', id, amount, opts),
     delete: (id) => ipcRenderer.invoke('sales:delete', id),
     getItems: (saleId) => ipcRenderer.invoke('sales:getItems', saleId),
     addItem: (data) => ipcRenderer.invoke('sales:addItem', data),
@@ -302,6 +321,7 @@ contextBridge.exposeInMainWorld('api', {
   auth: {
     login: (username, password) => ipcRenderer.invoke('auth:login', username, password),
     verifyPassword: (userId, password) => ipcRenderer.invoke('auth:verifyPassword', userId, password),
+    verifySession: (userId) => ipcRenderer.invoke('auth:verifySession', userId),
   },
 
   // ============================================
@@ -342,5 +362,17 @@ contextBridge.exposeInMainWorld('api', {
   // ============================================
   system: {
     reset: (data) => ipcRenderer.invoke('system:reset', data),
+  },
+
+  // ============================================
+  // EVENT BUS (main process broadcasts data-changed after mutations / sync imports)
+  // ============================================
+  // Subscribe with window.api.events.onDataChanged((domain) => ...). Returns an unsubscribe fn.
+  events: {
+    onDataChanged: (handler) => {
+      const listener = (_event, domain) => handler(domain);
+      ipcRenderer.on('data-changed', listener);
+      return () => ipcRenderer.removeListener('data-changed', listener);
+    },
   },
 });
