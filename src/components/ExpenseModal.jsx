@@ -5,7 +5,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import CustomSelect from './CustomSelect';
 
 const ExpenseModal = ({ isOpen, onClose, onSave, editItem, categories }) => {
-  const { t } = useLanguage();
+  const { t, tCat } = useLanguage();
   const [formData, setFormData] = useState({
     category_id: '',
     description: '',
@@ -143,7 +143,7 @@ const ExpenseModal = ({ isOpen, onClose, onSave, editItem, categories }) => {
               <CustomSelect
                 value={formData.category_id}
                 onChange={(val) => handleChange({ target: { name: 'category_id', value: val } })}
-                options={categories.map(cat => ({ value: cat.id, label: cat.name }))}
+                options={categories.map(cat => ({ value: cat.id, label: tCat(cat.name) }))}
                 placeholder={t('selectCategory')}
                 className="w-full"
               />

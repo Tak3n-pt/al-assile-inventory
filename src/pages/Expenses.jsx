@@ -10,7 +10,7 @@ import { useLanguage } from '../contexts/LanguageContext';
 import CustomSelect from '../components/CustomSelect';
 
 const Expenses = () => {
-  const { t } = useLanguage();
+  const { t, tCat } = useLanguage();
   const [expenses, setExpenses] = useState([]);
   const [categories, setCategories] = useState([]);
   const [stats, setStats] = useState({
@@ -228,7 +228,7 @@ const Expenses = () => {
         <CustomSelect
           value={selectedCategory}
           onChange={(val) => setSelectedCategory(val)}
-          options={categories.map(cat => ({ value: cat.id, label: cat.name }))}
+          options={categories.map(cat => ({ value: cat.id, label: tCat(cat.name) }))}
           placeholder={t('allCategories')}
         />
         <button
@@ -273,7 +273,7 @@ const Expenses = () => {
                   </td>
                   <td className="py-4 px-6">
                     <span className="px-2.5 py-1 rounded-full bg-rose-500/10 text-rose-400 text-sm">
-                      {expense.category_name || t('uncategorized')}
+                      {expense.category_name ? tCat(expense.category_name) : t('uncategorized')}
                     </span>
                   </td>
                   <td className="py-4 px-6">

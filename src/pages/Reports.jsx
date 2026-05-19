@@ -58,7 +58,7 @@ const TabButton = ({ active, onClick, icon: Icon, label }) => (
 );
 
 const Reports = () => {
-  const { t } = useLanguage();
+  const { t, tCat } = useLanguage();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [loading, setLoading] = useState(true);
   const [selectedYear, setSelectedYear] = useState(new Date().getFullYear());
@@ -607,7 +607,7 @@ const Reports = () => {
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
           {expensesByCategory.map((cat) => (
             <div key={cat.id} className="p-4 rounded-xl bg-dark-700/50 border border-dark-600/50">
-              <p className="text-white font-medium mb-1">{cat.category_name}</p>
+              <p className="text-white font-medium mb-1">{tCat(cat.category_name)}</p>
               <p className="text-2xl font-bold text-red-400">{formatCurrency(cat.total_amount)}</p>
               <p className="text-dark-400 text-sm">{cat.expense_count} {t('expenses')}</p>
             </div>

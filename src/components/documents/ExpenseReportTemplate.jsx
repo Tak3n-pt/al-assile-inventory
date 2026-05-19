@@ -17,7 +17,14 @@ const formatDate = (dateString) => {
   });
 };
 
+const CAT_NAMES = {
+  ar: { Water:'الماء', Electricity:'الكهرباء', Gas:'الغاز', Transport:'النقل', Rent:'الإيجار', Salaries:'الرواتب', Maintenance:'الصيانة', Other:'أخرى' },
+  fr: { Water:'Eau', Electricity:'Électricité', Gas:'Gaz', Transport:'Transport', Rent:'Loyer', Salaries:'Salaires', Maintenance:'Maintenance', Other:'Autre' },
+  en: { Water:'Water', Electricity:'Electricity', Gas:'Gas', Transport:'Transport', Rent:'Rent', Salaries:'Salaries', Maintenance:'Maintenance', Other:'Other' },
+};
+
 const ExpenseReportTemplate = forwardRef(({ data, settings, language = 'fr' }, ref) => {
+  const tCat = (name) => (name && CAT_NAMES[language]?.[name]) || (name && CAT_NAMES.en?.[name]) || name || '';
   const {
     dateRange = {},
     expenses = [],
@@ -29,7 +36,7 @@ const ExpenseReportTemplate = forwardRef(({ data, settings, language = 'fr' }, r
 
   // Group expenses by category for the table
   const expensesByCategory = expenses.reduce((acc, expense) => {
-    const cat = expense.category_name || 'Autre';
+    const cat = tCat(expense.category_name) || 'Autre';
     if (!acc[cat]) acc[cat] = [];
     acc[cat].push(expense);
     return acc;
@@ -186,7 +193,7 @@ const ExpenseReportTemplate = forwardRef(({ data, settings, language = 'fr' }, r
                   index % 2 === 0 ? 'bg-white' : 'bg-gray-50'
                 }`}
               >
-                <span className="text-gray-700">{cat.name}</span>
+                <span className="text-gray-700">{tCat(cat.name)}</span>
                 <span className="font-mono font-semibold text-amber-800">
                   {formatCurrency(cat.total)} DA
                 </span>
