@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { LogIn, User, Lock, AlertCircle, Eye, EyeOff, Shield, Package, TrendingUp } from 'lucide-react';
+import { LogIn, User, Lock, AlertCircle, Eye, EyeOff, Shield, Package, TrendingUp, KeyRound } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
 
@@ -34,6 +34,15 @@ const Login = () => {
   const [loading, setLoading] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
 
+  // Force-change-password modal state
+  const [mustChangePassword, setMustChangePassword] = useState(false);
+  const [pendingUserId, setPendingUserId] = useState(null);
+  const [newPass1, setNewPass1] = useState('');
+  const [newPass2, setNewPass2] = useState('');
+  const [showNewPass, setShowNewPass] = useState(false);
+  const [changingPassword, setChangingPassword] = useState(false);
+  const [changeError, setChangeError] = useState('');
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     if (!username || !password) {
@@ -47,7 +56,12 @@ const Login = () => {
     try {
       const result = await login(username, password);
       if (result.success) {
-        navigate('/');
+        if (result.mustChangePassword) {
+          setPendingUserId(result.user.id);
+          setMustChangePassword(true);
+        } else {
+          navigate('/');
+        }
       } else {
         setError(result.error || (language === 'ar' ? 'فشل تسجيل الدخول' : language === 'fr' ? 'Échec de la connexion' : 'Login failed'));
       }
@@ -55,6 +69,33 @@ const Login = () => {
       setError(language === 'ar' ? 'حدث خطأ' : language === 'fr' ? 'Une erreur est survenue' : 'An error occurred');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleChangePassword = async (e) => {
+    e.preventDefault();
+    setChangeError('');
+    if (!newPass1 || newPass1.length < 6) {
+      setChangeError(language === 'ar' ? 'كلمة المرور يجب أن تكون 6 أحرف على الأقل' : language === 'fr' ? 'Le mot de passe doit contenir au moins 6 caractères' : 'Password must be at least 6 characters');
+      return;
+    }
+    if (newPass1 !== newPass2) {
+      setChangeError(language === 'ar' ? 'كلمات المرور غير متطابقة' : language === 'fr' ? 'Les mots de passe ne correspondent pas' : 'Passwords do not match');
+      return;
+    }
+    setChangingPassword(true);
+    try {
+      const r = await window.api.users.updatePassword(pendingUserId, newPass1);
+      if (r.success) {
+        await window.api.settings.set('admin_password_set', '1');
+        navigate('/');
+      } else {
+        setChangeError(r.error || 'Failed to update password');
+      }
+    } catch (err) {
+      setChangeError('An error occurred');
+    } finally {
+      setChangingPassword(false);
     }
   };
 
@@ -328,6 +369,90 @@ const Login = () => {
           </p>
         </div>
       </div>
+
+      {/* Force password change modal */}
+      {mustChangePassword && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ background: 'rgba(0,0,0,0.85)' }}>
+          <div className="w-full max-w-sm mx-4 rounded-2xl p-6" style={{ background: '#0d1117', border: '1px solid rgba(212,165,116,0.2)' }}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-xl flex items-center justify-center" style={{ background: 'rgba(212,165,116,0.12)' }}>
+                <KeyRound size={20} style={{ color: '#D4A574' }} />
+              </div>
+              <div>
+                <h3 className="text-white font-semibold">
+                  {language === 'ar' ? 'تغيير كلمة المرور الافتراضية' : language === 'fr' ? 'Changer le mot de passe par défaut' : 'Change Default Password'}
+                </h3>
+                <p className="text-xs" style={{ color: '#666' }}>
+                  {language === 'ar' ? 'مطلوب قبل المتابعة' : language === 'fr' ? 'Requis avant de continuer' : 'Required before continuing'}
+                </p>
+              </div>
+            </div>
+
+            <p className="text-sm mb-5" style={{ color: '#8B7355' }}>
+              {language === 'ar'
+                ? 'يجب تغيير كلمة المرور الافتراضية (admin123) لأسباب أمنية.'
+                : language === 'fr'
+                  ? 'Le mot de passe par défaut (admin123) doit être changé pour des raisons de sécurité.'
+                  : 'The default password (admin123) must be changed for security reasons.'}
+            </p>
+
+            <form onSubmit={handleChangePassword} className="space-y-4">
+              {changeError && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-xl text-sm" style={{ background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.15)', color: '#f87171' }}>
+                  <AlertCircle size={16} />
+                  <span>{changeError}</span>
+                </div>
+              )}
+              <div>
+                <label className="block text-xs font-medium uppercase tracking-wider mb-1.5" style={{ color: '#888' }}>
+                  {language === 'ar' ? 'كلمة المرور الجديدة' : language === 'fr' ? 'Nouveau mot de passe' : 'New Password'}
+                </label>
+                <div className="relative">
+                  <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: '#555' }} />
+                  <input
+                    type={showNewPass ? 'text' : 'password'}
+                    value={newPass1}
+                    onChange={e => { setNewPass1(e.target.value); setChangeError(''); }}
+                    autoFocus
+                    className="w-full pl-9 pr-9 py-2.5 rounded-xl text-sm text-white outline-none"
+                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                  />
+                  <button type="button" onClick={() => setShowNewPass(p => !p)} className="absolute right-3 top-1/2 -translate-y-1/2" style={{ color: '#555' }}>
+                    {showNewPass ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label className="block text-xs font-medium uppercase tracking-wider mb-1.5" style={{ color: '#888' }}>
+                  {language === 'ar' ? 'تأكيد كلمة المرور' : language === 'fr' ? 'Confirmer le mot de passe' : 'Confirm Password'}
+                </label>
+                <div className="relative">
+                  <Lock size={16} className="absolute left-3 top-1/2 -translate-y-1/2" style={{ color: '#555' }} />
+                  <input
+                    type={showNewPass ? 'text' : 'password'}
+                    value={newPass2}
+                    onChange={e => { setNewPass2(e.target.value); setChangeError(''); }}
+                    className="w-full pl-9 pr-4 py-2.5 rounded-xl text-sm text-white outline-none"
+                    style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)' }}
+                  />
+                </div>
+              </div>
+              <button
+                type="submit"
+                disabled={changingPassword}
+                className="w-full flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-semibold transition-all disabled:opacity-40"
+                style={{ background: 'linear-gradient(135deg, #8B6914 0%, #D4A574 100%)', color: '#fff' }}
+              >
+                {changingPassword
+                  ? <div className="w-4 h-4 border-2 rounded-full animate-spin" style={{ borderColor: 'rgba(255,255,255,0.2)', borderTopColor: '#fff' }} />
+                  : <KeyRound size={16} />
+                }
+                {language === 'ar' ? 'تغيير وتسجيل الدخول' : language === 'fr' ? 'Changer et se connecter' : 'Change & Sign In'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

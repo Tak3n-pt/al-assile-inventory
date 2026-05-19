@@ -467,6 +467,8 @@ const initDatabase = (db) => {
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           client_id INTEGER,
           date DATE NOT NULL,
+          subtotal REAL DEFAULT 0,
+          discount REAL DEFAULT 0,
           total REAL DEFAULT 0,
           paid_amount REAL DEFAULT 0,
           status TEXT DEFAULT 'pending' CHECK(status IN ('pending', 'partial', 'paid', 'cancelled', 'return')),
@@ -553,7 +555,9 @@ const initDatabase = (db) => {
     { key: 'next_exit_voucher_number', value: '1' },
     { key: 'next_credit_note_number', value: '1' },
     { key: 'next_quote_number', value: '1' },
-    { key: 'next_reception_voucher_number', value: '1' }
+    { key: 'next_reception_voucher_number', value: '1' },
+    { key: 'cloud_server_url', value: 'https://al-assile-mobile.onrender.com' },
+    { key: 'cloud_sync_key', value: 'alassile2024sync' }
   ];
 
   const insertSetting = db.prepare(`
@@ -562,6 +566,54 @@ const initDatabase = (db) => {
 
   for (const setting of defaultSettings) {
     insertSetting.run(setting.key, setting.value);
+  }
+
+  // Migration: track mobile supplier/client payments already applied (prevents double-balance)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS mobile_processed (
+      id TEXT PRIMARY KEY
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS client_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sale_id INTEGER,
+      amount REAL NOT NULL,
+      method TEXT DEFAULT 'cash',
+      date DATE NOT NULL,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (sale_id) REFERENCES sales(id)
+    )
+  `);
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS supplier_payments (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      supplier_id INTEGER,
+      amount REAL NOT NULL,
+      method TEXT DEFAULT 'cash',
+      date DATE NOT NULL,
+      notes TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (supplier_id) REFERENCES suppliers(id)
+    )
+  `);
+
+  // Migration: remote_id links desktop clients to their mobile-origin id for server remap
+  if (!columnExists('clients', 'remote_id')) {
+    db.exec(`ALTER TABLE clients ADD COLUMN remote_id TEXT`);
+  }
+
+  // Migration: remote_id links desktop suppliers to their mobile-origin id for server remap
+  if (!columnExists('suppliers', 'remote_id')) {
+    db.exec(`ALTER TABLE suppliers ADD COLUMN remote_id TEXT`);
+  }
+
+  // Migration: client_id on client_payments enables on-account payments and server push
+  if (!columnExists('client_payments', 'client_id')) {
+    db.exec(`ALTER TABLE client_payments ADD COLUMN client_id INTEGER REFERENCES clients(id)`);
   }
 
   console.log('Database initialized successfully!');

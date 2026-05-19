@@ -323,6 +323,18 @@ contextBridge.exposeInMainWorld('api', {
   sync: {
     push: (serverUrl, syncKey) => ipcRenderer.invoke('sync:push', serverUrl, syncKey),
     pull: (serverUrl, syncKey) => ipcRenderer.invoke('sync:pull', serverUrl, syncKey),
+    onStatus: (callback) => {
+      const listener = (_, data) => callback(data);
+      ipcRenderer.on('sync:status', listener);
+      return () => ipcRenderer.removeListener('sync:status', listener);
+    },
+  },
+
+  // ============================================
+  // DATABASE
+  // ============================================
+  db: {
+    backup: () => ipcRenderer.invoke('db:backup'),
   },
 
   // ============================================

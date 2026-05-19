@@ -4,6 +4,42 @@ const fs = require('fs');
 
 const isDev = !app.isPackaged;
 
+// ============================================
+// AUTO-SYNC TRIGGER (wraps mutation IPC handlers)
+// Pushes local changes to the cloud immediately after any add/update/delete
+// so the mobile app / website sees changes within ~1.5s instead of up to 30s.
+// ============================================
+let _syncDebounceTimer = null;
+function requestSync() {
+  if (_syncDebounceTimer) clearTimeout(_syncDebounceTimer);
+  _syncDebounceTimer = setTimeout(() => {
+    _syncDebounceTimer = null;
+    if (typeof autoSyncPush === 'function') {
+      autoSyncPush().catch(err =>
+        console.error('[auto-sync] Triggered push failed:', err.message)
+      );
+    }
+  }, 1500);
+}
+
+const _originalIpcHandle = ipcMain.handle.bind(ipcMain);
+const _mutationChannelRe = /:(add|update|delete|create|remove|adjust|set|produce|save|fix|mark|generate|toggle)/i;
+ipcMain.handle = function (channel, handler) {
+  if (
+    typeof channel === 'string' &&
+    _mutationChannelRe.test(channel) &&
+    !channel.startsWith('window:') &&
+    !channel.startsWith('sync:')
+  ) {
+    return _originalIpcHandle(channel, async (...args) => {
+      const result = await handler(...args);
+      if (result && result.success !== false) requestSync();
+      return result;
+    });
+  }
+  return _originalIpcHandle(channel, handler);
+};
+
 // Database setup
 let db = null;
 let stockDb = null;
@@ -1654,7 +1690,12 @@ ipcMain.handle('documents:getNextNumber', (_, type) => {
 // ============================================
 ipcMain.handle('auth:login', (_, username, password) => {
   try {
-    return usersDb.login(username, password);
+    const result = usersDb.login(username, password);
+    if (result.success && result.user && result.user.role === 'admin') {
+      const adminPasswordSet = settingsDb.getSetting('admin_password_set');
+      if (!adminPasswordSet) result.mustChangePassword = true;
+    }
+    return result;
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1669,6 +1710,28 @@ ipcMain.handle('auth:verifyPassword', (_, userId, password) => {
     const bcrypt = require('bcryptjs');
     const isValid = bcrypt.compareSync(password, user.password_hash);
     return { success: isValid, error: isValid ? null : 'Invalid password' };
+  } catch (error) {
+    return { success: false, error: error.message };
+  }
+});
+
+// ============================================
+// DATABASE BACKUP
+// ============================================
+ipcMain.handle('db:backup', async () => {
+  try {
+    const defaultName = `alassile-backup-${new Date().toISOString().split('T')[0]}.db`;
+    const srcPath = isDev
+      ? path.join(__dirname, '../inventory.db')
+      : path.join(app.getPath('userData'), 'inventory.db');
+    const { filePath, canceled } = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Database Backup',
+      defaultPath: path.join(app.getPath('downloads'), defaultName),
+      filters: [{ name: 'SQLite Database', extensions: ['db'] }]
+    });
+    if (canceled || !filePath) return { success: false, canceled: true };
+    await fs.promises.copyFile(srcPath, filePath);
+    return { success: true, path: filePath };
   } catch (error) {
     return { success: false, error: error.message };
   }
@@ -1778,54 +1841,104 @@ async function autoSyncPush() {
     });
 
     const clients = clientsDb.getAllClients();
+    const suppliers = suppliersDb.getAllSuppliers();
     const users = db.prepare('SELECT * FROM users').all();
     const settingsObj = settingsDb.getAllSettings();
     const settings = Object.entries(settingsObj).map(([key, value]) => ({ key, value }));
 
+    const desktopSales = db.prepare("SELECT * FROM sales WHERE notes IS NULL OR notes NOT LIKE '[Mobile#%'").all();
+    const desktopSaleIds = desktopSales.map(s => s.id);
+    const desktopSaleItems = desktopSaleIds.length > 0
+      ? db.prepare(`SELECT * FROM sale_items WHERE sale_id IN (${desktopSaleIds.map(() => '?').join(',')})`).all(...desktopSaleIds)
+      : [];
+    const clientPayments = db.prepare('SELECT * FROM client_payments').all();
+
     const response = await fetch(`${serverUrl}/api/sync/push`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'X-Sync-Key': syncKey },
-      body: JSON.stringify({ products: productsWithImages, clients, users, settings })
+      body: JSON.stringify({ products: productsWithImages, clients, suppliers, users, settings, sales: desktopSales, sale_items: desktopSaleItems, client_payments: clientPayments })
     });
 
     const result = await response.json();
     if (result.success) {
       settingsDb.setSetting('last_sync_push', new Date().toISOString());
       console.log('[auto-sync] Push complete:', result.counts);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync:status', { ok: true, type: 'push' });
+      }
     } else {
       console.log('[auto-sync] Push failed:', result.error);
     }
   } catch (err) {
-    console.log('[auto-sync] Error:', err.message);
+    console.log('[auto-sync] Push error:', err.message);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:status', { ok: false, type: 'push', message: err.message });
+    }
   } finally {
     autoSyncRunning = false;
   }
 }
 
-// Auto-pull mobile sales
+// Auto-pull mobile data (sales, payments, clients, suppliers)
+let autoSyncPullRunning = false;
 async function autoSyncPull() {
+  if (autoSyncPullRunning) return;
   try {
     const serverUrl = settingsDb.getSetting('cloud_server_url');
     const syncKey = settingsDb.getSetting('cloud_sync_key');
     if (!serverUrl || !syncKey) return;
 
+    autoSyncPullRunning = true;
     const lastPull = settingsDb.getSetting('last_sync_pull') || '1970-01-01T00:00:00.000Z';
+    const watermarkTs = new Date().toISOString();
     const response = await fetch(`${serverUrl}/api/sync/pull?since=${encodeURIComponent(lastPull)}`, {
       headers: { 'X-Sync-Key': syncKey }
     });
     const data = await response.json();
-    if (!data.success || !data.sales || data.sales.length === 0) return;
+    if (!data.success) return;
 
-    const importSales = db.transaction(() => {
-      for (const sale of data.sales) {
-        const isReturn = sale.status === 'return' || sale.total < 0;
-        const result = db.prepare(
-          'INSERT INTO sales (client_id, date, total, paid_amount, status, notes) VALUES (?, ?, ?, ?, ?, ?)'
-        ).run(sale.client_id, sale.date, sale.total, sale.paid_amount, sale.status || 'pending',
-          sale.notes ? '[Mobile] ' + sale.notes : (isReturn ? '[Mobile Return]' : '[Mobile Sale]'));
-        const newSaleId = result.lastInsertRowid;
-        if (sale.items) {
-          for (const item of sale.items) {
+    const sales = data.sales || [];
+    const payments = data.payments || [];
+    const clients = data.clients || [];
+    const suppliers = data.suppliers || [];
+    const supplierPayments = data.supplier_payments || [];
+    const productsList = data.products || [];
+    if (!sales.length && !payments.length && !clients.length && !suppliers.length && !supplierPayments.length && !productsList.length) return;
+
+    const importAll = db.transaction(() => {
+      // 1. Sales — handle both CREATE and UPDATE
+      for (const sale of sales) {
+        if (sale.__action === 'delete') continue;
+        const isReturn = sale.status === 'return' || (sale.total || 0) < 0;
+        const tag = `[Mobile#${sale.id}]`;
+        const existing = db.prepare('SELECT id, total, paid_amount FROM sales WHERE notes LIKE ?').get(tag + '%');
+        if (existing) {
+          const oldUnpaid = (existing.total || 0) - (existing.paid_amount || 0);
+          const newUnpaid = (sale.total || 0) - (sale.paid_amount || 0);
+          const delta = oldUnpaid - newUnpaid;
+          const desktopStatus = isReturn ? 'return' : (sale.status || 'pending');
+          db.prepare('UPDATE sales SET paid_amount = ?, status = ?, total = ?, subtotal = ?, discount = ? WHERE id = ?')
+            .run(sale.paid_amount || 0, desktopStatus, sale.total || 0, sale.subtotal || 0, sale.discount || 0, existing.id);
+          if (delta !== 0 && sale.client_id) {
+            const dc = db.prepare('SELECT id FROM clients WHERE id = ? OR remote_id = ?').get(sale.client_id, String(sale.client_id));
+            if (dc) db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(delta, dc.id);
+          }
+          if (sale.items && sale.items.length > 0) {
+            db.prepare('DELETE FROM sale_items WHERE sale_id = ?').run(existing.id);
+            for (const item of sale.items) {
+              db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)')
+                .run(existing.id, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
+            }
+          }
+        } else {
+          const desktopStatus = isReturn ? 'return' : (sale.status || 'pending');
+          const notesSuffix = sale.notes ? ': ' + sale.notes : '';
+          const notes = `${tag} ${isReturn ? 'Return' : 'Sale'}${notesSuffix}`;
+          const result = db.prepare(
+            'INSERT INTO sales (client_id, date, total, subtotal, discount, paid_amount, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          ).run(sale.client_id, sale.date, sale.total || 0, sale.subtotal || 0, sale.discount || 0, sale.paid_amount || 0, desktopStatus, notes);
+          const newSaleId = result.lastInsertRowid;
+          for (const item of (sale.items || [])) {
             db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)')
               .run(newSaleId, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
             if (isReturn) {
@@ -1834,19 +1947,112 @@ async function autoSyncPull() {
               db.prepare('UPDATE products SET quantity = quantity - ? WHERE id = ?').run(item.quantity, item.product_id);
             }
           }
-        }
-        if (isReturn && sale.client_id) {
-          db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(Math.abs(sale.total), sale.client_id);
-        } else if (!isReturn && sale.client_id && sale.total > sale.paid_amount) {
-          db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?').run(sale.total - sale.paid_amount, sale.client_id);
+          if (sale.client_id) {
+            const dc = db.prepare('SELECT id FROM clients WHERE id = ? OR remote_id = ?').get(sale.client_id, String(sale.client_id));
+            if (dc) {
+              if (isReturn) {
+                db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(Math.abs(sale.total || 0), dc.id);
+              } else if ((sale.total || 0) > (sale.paid_amount || 0)) {
+                db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?').run((sale.total || 0) - (sale.paid_amount || 0), dc.id);
+              }
+            }
+          }
         }
       }
+
+      // 2. Client payments from mobile — audit record (balance handled by sale updates above)
+      for (const cp of payments) {
+        if (cp.__action === 'delete') continue;
+        const key = `cp:${cp.id}`;
+        const seen = db.prepare('SELECT 1 FROM mobile_processed WHERE id = ?').get(key);
+        if (seen) continue;
+        db.prepare('INSERT INTO mobile_processed (id) VALUES (?)').run(key);
+        const desktopSale = cp.sale_id
+          ? db.prepare('SELECT id FROM sales WHERE notes LIKE ?').get(`[Mobile#${cp.sale_id}]%`)
+          : null;
+        const dcClient = cp.client_id ? db.prepare('SELECT id FROM clients WHERE id = ? OR remote_id = ?').get(cp.client_id, String(cp.client_id)) : null;
+        db.prepare('INSERT INTO client_payments (sale_id, client_id, amount, method, date, notes) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(desktopSale ? desktopSale.id : null, dcClient ? dcClient.id : null, cp.amount || 0, cp.method || 'cash', cp.date, cp.notes || null);
+        if (dcClient) {
+          db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(cp.amount || 0, dcClient.id);
+        }
+      }
+
+      // 3. New clients created on mobile
+      for (const c of clients) {
+        if (c.__action === 'delete') continue;
+        const exists = db.prepare('SELECT id FROM clients WHERE name = ?').get(c.name);
+        if (!exists) {
+          db.prepare('INSERT INTO clients (name, phone, address, notes, balance, remote_id) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(c.name, c.phone || null, c.address || null, c.notes || null, c.balance || 0, String(c.id));
+        }
+      }
+
+      // 4. New suppliers created on mobile
+      for (const s of suppliers) {
+        if (s.__action === 'delete') continue;
+        const exists = db.prepare('SELECT id FROM suppliers WHERE name = ?').get(s.name);
+        if (!exists) {
+          db.prepare('INSERT INTO suppliers (name, phone, address, notes, balance, remote_id) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(s.name, s.phone || null, s.address || null, s.notes || null, s.balance || 0, String(s.id));
+        }
+      }
+
+      // 5. Supplier payments from mobile — apply once to supplier balance and record history
+      for (const sp of supplierPayments) {
+        if (sp.__action === 'delete') continue;
+        const key = `sp:${sp.id}`;
+        const seen = db.prepare('SELECT 1 FROM mobile_processed WHERE id = ?').get(key);
+        if (seen) continue;
+        db.prepare('INSERT INTO mobile_processed (id) VALUES (?)').run(key);
+        if (sp.supplier_id) {
+          const ds = db.prepare('SELECT id FROM suppliers WHERE id = ? OR remote_id = ?').get(sp.supplier_id, String(sp.supplier_id));
+          if (ds) {
+            db.prepare('UPDATE suppliers SET balance = balance - ? WHERE id = ?').run(sp.amount || 0, ds.id);
+            db.prepare('INSERT INTO supplier_payments (supplier_id, amount, method, date, notes) VALUES (?, ?, ?, ?, ?)')
+              .run(ds.id, sp.amount || 0, sp.method || 'cash', sp.date, sp.notes || null);
+          }
+        }
+      }
+
+      // 6. Product mutations from mobile (price/name/qty/etc. edits + soft deletes).
+      //    Only UPDATE products that already exist locally — mobile-created
+      //    products are out of scope. Skip if not found.
+      const updateProduct = db.prepare(`
+        UPDATE products SET
+          name = ?, description = ?, selling_price = ?, unit = ?, barcode = ?,
+          is_favorite = ?, is_active = ?, quantity = ?, min_stock_alert = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `);
+      for (const p of productsList) {
+        const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(p.id);
+        if (!existing) continue; // mobile-created product, not supported
+        updateProduct.run(
+          p.name,
+          p.description || null,
+          p.selling_price || 0,
+          p.unit || 'pcs',
+          p.barcode || null,
+          p.is_favorite ? 1 : 0,
+          p.is_active !== undefined ? (p.is_active ? 1 : 0) : 1,
+          p.quantity || 0,
+          p.min_stock_alert || 0,
+          p.id
+        );
+      }
     });
-    importSales();
-    settingsDb.setSetting('last_sync_pull', new Date().toISOString());
-    console.log('[auto-sync] Pulled', data.sales.length, 'mobile sales');
+
+    importAll();
+    settingsDb.setSetting('last_sync_pull', watermarkTs);
+    console.log('[auto-sync] Pulled — sales:', sales.length, 'payments:', payments.length, 'clients:', clients.length, 'suppliers:', suppliers.length, 'supplier payments:', supplierPayments.length, 'products:', productsList.length);
   } catch (err) {
-    // Silent fail for auto-pull
+    console.error('[auto-sync] Pull error:', err.message);
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync:status', { ok: false, type: 'pull', message: err.message });
+    }
+  } finally {
+    autoSyncPullRunning = false;
   }
 }
 
@@ -1883,10 +2089,18 @@ ipcMain.handle('sync:push', async (_, serverUrl, syncKey) => {
     }
 
     const clients = clientsDb.getAllClients();
+    const suppliers = suppliersDb.getAllSuppliers();
     const users = db.prepare('SELECT * FROM users').all();
     const settingsObj = settingsDb.getAllSettings();
     // Convert settings object to array format for cloud sync
     const settings = Object.entries(settingsObj).map(([key, value]) => ({ key, value }));
+
+    const desktopSales = db.prepare("SELECT * FROM sales WHERE notes IS NULL OR notes NOT LIKE '[Mobile#%'").all();
+    const desktopSaleIds = desktopSales.map(s => s.id);
+    const desktopSaleItems = desktopSaleIds.length > 0
+      ? db.prepare(`SELECT * FROM sale_items WHERE sale_id IN (${desktopSaleIds.map(() => '?').join(',')})`).all(...desktopSaleIds)
+      : [];
+    const clientPayments = db.prepare('SELECT * FROM client_payments').all();
 
     const response = await fetch(`${serverUrl}/api/sync/push`, {
       method: 'POST',
@@ -1894,7 +2108,7 @@ ipcMain.handle('sync:push', async (_, serverUrl, syncKey) => {
         'Content-Type': 'application/json',
         'X-Sync-Key': syncKey
       },
-      body: JSON.stringify({ products: productsWithImages, clients, users, settings })
+      body: JSON.stringify({ products: productsWithImages, clients, suppliers, users, settings, sales: desktopSales, sale_items: desktopSaleItems, client_payments: clientPayments })
     });
 
     const result = await response.json();
@@ -1917,54 +2131,159 @@ ipcMain.handle('sync:pull', async (_, serverUrl, syncKey) => {
     const data = await response.json();
     if (!data.success) return data;
 
+    const sales = data.sales || [];
+    const payments = data.payments || [];
+    const clients = data.clients || [];
+    const suppliers = data.suppliers || [];
+    const supplierPayments = data.supplier_payments || [];
+    const productsList = data.products || [];
+
     let imported = 0;
-    if (data.sales && data.sales.length > 0) {
-      const importSales = db.transaction(() => {
-        for (const sale of data.sales) {
-          const isReturn = sale.status === 'return' || sale.total < 0;
-          const result = db.prepare(
-            'INSERT INTO sales (client_id, date, total, paid_amount, status, notes) VALUES (?, ?, ?, ?, ?, ?)'
-          ).run(
-            sale.client_id, sale.date, sale.total, sale.paid_amount, sale.status || 'pending',
-            sale.notes ? '[Mobile] ' + sale.notes : (isReturn ? '[Mobile Return]' : '[Mobile Sale]')
-          );
-          const newSaleId = result.lastInsertRowid;
 
-          if (sale.items) {
+    const importAll = db.transaction(() => {
+      // 1. Sales — handle CREATE and UPDATE
+      for (const sale of sales) {
+        if (sale.__action === 'delete') continue;
+        const isReturn = sale.status === 'return' || (sale.total || 0) < 0;
+        const tag = `[Mobile#${sale.id}]`;
+        const existing = db.prepare('SELECT id, total, paid_amount FROM sales WHERE notes LIKE ?').get(tag + '%');
+        if (existing) {
+          const oldUnpaid = (existing.total || 0) - (existing.paid_amount || 0);
+          const newUnpaid = (sale.total || 0) - (sale.paid_amount || 0);
+          const delta = oldUnpaid - newUnpaid;
+          const desktopStatus = isReturn ? 'return' : (sale.status || 'pending');
+          db.prepare('UPDATE sales SET paid_amount = ?, status = ?, total = ?, subtotal = ?, discount = ? WHERE id = ?')
+            .run(sale.paid_amount || 0, desktopStatus, sale.total || 0, sale.subtotal || 0, sale.discount || 0, existing.id);
+          if (delta !== 0 && sale.client_id) {
+            const dc = db.prepare('SELECT id FROM clients WHERE id = ? OR remote_id = ?').get(sale.client_id, String(sale.client_id));
+            if (dc) db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(delta, dc.id);
+          }
+          if (sale.items && sale.items.length > 0) {
+            db.prepare('DELETE FROM sale_items WHERE sale_id = ?').run(existing.id);
             for (const item of sale.items) {
-              db.prepare(
-                'INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)'
-              ).run(newSaleId, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
-
+              db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)')
+                .run(existing.id, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
+            }
+          }
+        } else {
+          const desktopStatus = isReturn ? 'return' : (sale.status || 'pending');
+          const notesSuffix = sale.notes ? ': ' + sale.notes : '';
+          const notes = `${tag} ${isReturn ? 'Return' : 'Sale'}${notesSuffix}`;
+          const result = db.prepare(
+            'INSERT INTO sales (client_id, date, total, subtotal, discount, paid_amount, status, notes) VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+          ).run(sale.client_id, sale.date, sale.total || 0, sale.subtotal || 0, sale.discount || 0, sale.paid_amount || 0, desktopStatus, notes);
+          const newSaleId = result.lastInsertRowid;
+          for (const item of (sale.items || [])) {
+            db.prepare('INSERT INTO sale_items (sale_id, product_id, quantity, unit_price, total) VALUES (?, ?, ?, ?, ?)')
+              .run(newSaleId, item.product_id, item.quantity, item.unit_price, item.total || item.quantity * item.unit_price);
+            if (isReturn) {
+              db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?').run(item.quantity, item.product_id);
+            } else {
+              db.prepare('UPDATE products SET quantity = quantity - ? WHERE id = ?').run(item.quantity, item.product_id);
+            }
+          }
+          if (sale.client_id) {
+            const dc = db.prepare('SELECT id FROM clients WHERE id = ? OR remote_id = ?').get(sale.client_id, String(sale.client_id));
+            if (dc) {
               if (isReturn) {
-                // Return: restore stock
-                db.prepare('UPDATE products SET quantity = quantity + ? WHERE id = ?')
-                  .run(item.quantity, item.product_id);
-              } else {
-                // Normal sale: deduct stock
-                db.prepare('UPDATE products SET quantity = quantity - ? WHERE id = ?')
-                  .run(item.quantity, item.product_id);
+                db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(Math.abs(sale.total || 0), dc.id);
+              } else if ((sale.total || 0) > (sale.paid_amount || 0)) {
+                db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?').run((sale.total || 0) - (sale.paid_amount || 0), dc.id);
               }
             }
           }
+        }
+        imported++;
+      }
 
-          if (isReturn && sale.client_id) {
-            // Return: reduce client debt (add back the return amount)
-            const returnAmount = Math.abs(sale.total);
-            db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?')
-              .run(returnAmount, sale.client_id);
-          } else if (!isReturn && sale.client_id && sale.total > sale.paid_amount) {
-            // Normal sale: increase client debt
-            const debt = sale.total - sale.paid_amount;
-            db.prepare('UPDATE clients SET balance = balance - ? WHERE id = ?')
-              .run(debt, sale.client_id);
-          }
+      // 2. Client payments from mobile — audit record (balance handled by sale updates above)
+      for (const cp of payments) {
+        if (cp.__action === 'delete') continue;
+        const key = `cp:${cp.id}`;
+        const seen = db.prepare('SELECT 1 FROM mobile_processed WHERE id = ?').get(key);
+        if (seen) continue;
+        db.prepare('INSERT INTO mobile_processed (id) VALUES (?)').run(key);
+        const desktopSale = cp.sale_id
+          ? db.prepare('SELECT id FROM sales WHERE notes LIKE ?').get(`[Mobile#${cp.sale_id}]%`)
+          : null;
+        const dcClient = cp.client_id ? db.prepare('SELECT id FROM clients WHERE id = ? OR remote_id = ?').get(cp.client_id, String(cp.client_id)) : null;
+        db.prepare('INSERT INTO client_payments (sale_id, client_id, amount, method, date, notes) VALUES (?, ?, ?, ?, ?, ?)')
+          .run(desktopSale ? desktopSale.id : null, dcClient ? dcClient.id : null, cp.amount || 0, cp.method || 'cash', cp.date, cp.notes || null);
+        if (dcClient) {
+          db.prepare('UPDATE clients SET balance = balance + ? WHERE id = ?').run(cp.amount || 0, dcClient.id);
+        }
+        imported++;
+      }
+
+      // 3. New clients from mobile
+      for (const c of clients) {
+        if (c.__action === 'delete') continue;
+        const exists = db.prepare('SELECT id FROM clients WHERE name = ?').get(c.name);
+        if (!exists) {
+          db.prepare('INSERT INTO clients (name, phone, address, notes, balance, remote_id) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(c.name, c.phone || null, c.address || null, c.notes || null, c.balance || 0, String(c.id));
           imported++;
         }
-      });
-      importSales();
-    }
+      }
 
+      // 4. New suppliers from mobile
+      for (const s of suppliers) {
+        if (s.__action === 'delete') continue;
+        const exists = db.prepare('SELECT id FROM suppliers WHERE name = ?').get(s.name);
+        if (!exists) {
+          db.prepare('INSERT INTO suppliers (name, phone, address, notes, balance, remote_id) VALUES (?, ?, ?, ?, ?, ?)')
+            .run(s.name, s.phone || null, s.address || null, s.notes || null, s.balance || 0, String(s.id));
+          imported++;
+        }
+      }
+
+      // 5. Supplier payments from mobile — apply once to supplier balance and record history
+      for (const sp of supplierPayments) {
+        if (sp.__action === 'delete') continue;
+        const key = `sp:${sp.id}`;
+        const seen = db.prepare('SELECT 1 FROM mobile_processed WHERE id = ?').get(key);
+        if (seen) continue;
+        db.prepare('INSERT INTO mobile_processed (id) VALUES (?)').run(key);
+        if (sp.supplier_id) {
+          const ds = db.prepare('SELECT id FROM suppliers WHERE id = ? OR remote_id = ?').get(sp.supplier_id, String(sp.supplier_id));
+          if (ds) {
+            db.prepare('UPDATE suppliers SET balance = balance - ? WHERE id = ?').run(sp.amount || 0, ds.id);
+            db.prepare('INSERT INTO supplier_payments (supplier_id, amount, method, date, notes) VALUES (?, ?, ?, ?, ?)')
+              .run(ds.id, sp.amount || 0, sp.method || 'cash', sp.date, sp.notes || null);
+          }
+        }
+        imported++;
+      }
+
+      // 6. Product mutations from mobile (price/name/qty/etc. + soft deletes).
+      //    UPDATE existing products only; mobile-created products are out of scope.
+      const updateProduct = db.prepare(`
+        UPDATE products SET
+          name = ?, description = ?, selling_price = ?, unit = ?, barcode = ?,
+          is_favorite = ?, is_active = ?, quantity = ?, min_stock_alert = ?,
+          updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `);
+      for (const p of productsList) {
+        const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(p.id);
+        if (!existing) continue;
+        updateProduct.run(
+          p.name,
+          p.description || null,
+          p.selling_price || 0,
+          p.unit || 'pcs',
+          p.barcode || null,
+          p.is_favorite ? 1 : 0,
+          p.is_active !== undefined ? (p.is_active ? 1 : 0) : 1,
+          p.quantity || 0,
+          p.min_stock_alert || 0,
+          p.id
+        );
+        imported++;
+      }
+    });
+
+    importAll();
     settingsDb.setSetting('last_sync_pull', new Date().toISOString());
     return { success: true, imported };
   } catch (error) {

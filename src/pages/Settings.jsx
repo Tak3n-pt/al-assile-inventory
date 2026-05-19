@@ -25,7 +25,8 @@ import {
   Search,
   Cloud,
   Upload,
-  Download
+  Download,
+  HardDrive
 } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -82,6 +83,7 @@ const Settings = () => {
   const [syncMessage, setSyncMessage] = useState({ type: '', text: '' });
   const [lastSyncPush, setLastSyncPush] = useState(null);
   const [lastSyncPull, setLastSyncPull] = useState(null);
+  const [backing, setBacking] = useState(false);
 
   // Load users and inventory
   useEffect(() => {
@@ -90,6 +92,18 @@ const Settings = () => {
       loadInventory();
       loadSyncSettings();
     }
+  }, []);
+
+  // Listen for background sync errors from main process
+  useEffect(() => {
+    if (!window.api?.sync?.onStatus) return;
+    const unsub = window.api.sync.onStatus((status) => {
+      if (!status.ok) {
+        setSyncMessage({ type: 'error', text: `Auto-sync ${status.type || ''} failed: ${status.message || 'connection error'}` });
+        setTimeout(() => setSyncMessage({ type: '', text: '' }), 6000);
+      }
+    });
+    return unsub;
   }, []);
 
   const loadUsers = async () => {
@@ -204,6 +218,22 @@ const Settings = () => {
       setSyncMessage({ type: 'error', text: err.message });
     } finally {
       setSyncPulling(false);
+    }
+  };
+
+  const handleBackup = async () => {
+    try {
+      setBacking(true);
+      const result = await window.api.db.backup();
+      if (result.success) {
+        setSyncMessage({ type: 'success', text: language === 'ar' ? 'تم حفظ النسخة الاحتياطية بنجاح' : language === 'fr' ? 'Sauvegarde enregistrée avec succès' : `Backup saved successfully` });
+      } else if (!result.canceled) {
+        setSyncMessage({ type: 'error', text: result.error || 'Backup failed' });
+      }
+    } catch (err) {
+      setSyncMessage({ type: 'error', text: err.message });
+    } finally {
+      setBacking(false);
     }
   };
 
@@ -852,6 +882,23 @@ const Settings = () => {
                   {language === 'ar' ? 'سحب من السحابة' : 'Pull from Cloud'}
                 </motion.button>
               </div>
+
+              {/* Backup button */}
+              <motion.button
+                whileHover={{ scale: 1.01 }}
+                whileTap={{ scale: 0.99 }}
+                onClick={handleBackup}
+                disabled={backing}
+                className="w-full flex items-center justify-center gap-2 px-4 py-3 rounded-xl font-medium transition-all disabled:opacity-50"
+                style={{ background: 'rgba(212,165,116,0.08)', border: '1px solid rgba(212,165,116,0.2)', color: '#D4A574' }}
+              >
+                {backing ? (
+                  <div className="w-5 h-5 border-2 rounded-full animate-spin" style={{ borderColor: 'rgba(212,165,116,0.2)', borderTopColor: '#D4A574' }} />
+                ) : (
+                  <HardDrive size={18} />
+                )}
+                {language === 'ar' ? 'نسخ احتياطي للقاعدة' : language === 'fr' ? 'Sauvegarder la base de données' : 'Backup Database'}
+              </motion.button>
 
               {/* Timestamps */}
               {(lastSyncPush || lastSyncPull) && (

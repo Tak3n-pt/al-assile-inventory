@@ -615,7 +615,7 @@ const KeyboardShortcutsHelp = ({ isOpen, onClose, t }) => {
 const SalesHistory = ({ t }) => {
   const [sales, setSales] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [dateFilter, setDateFilter] = useState('today');
+  const [dateFilter, setDateFilter] = useState('week');
   const [customDateRange, setCustomDateRange] = useState({ start: '', end: '' });
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [selectedSale, setSelectedSale] = useState(null);
