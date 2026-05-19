@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Minus, Square, X, Copy } from 'lucide-react';
+import SyncStatusIndicator from './SyncStatusIndicator';
 
 const TitleBar = () => {
   const [isMaximized, setIsMaximized] = useState(false);
@@ -28,6 +29,9 @@ const TitleBar = () => {
           <div className="w-2 h-2 rounded-full bg-dark-500" />
         </div>
       </div>
+
+      {/* Sync Status */}
+      <SyncStatusIndicator />
 
       {/* Window Controls - macOS Style */}
       <div className="title-bar-button flex items-center h-full">

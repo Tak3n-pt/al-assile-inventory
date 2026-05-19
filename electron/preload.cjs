@@ -343,6 +343,13 @@ contextBridge.exposeInMainWorld('api', {
   sync: {
     push: (serverUrl, syncKey) => ipcRenderer.invoke('sync:push', serverUrl, syncKey),
     pull: (serverUrl, syncKey) => ipcRenderer.invoke('sync:pull', serverUrl, syncKey),
+    // Aggregated read of sync-related settings for the status indicator.
+    // Returns { configured, last_sync_push, last_sync_pull, last_sync_attempt_at,
+    //          last_sync_attempt_ok, last_sync_error, dev_mode, dev_sync_allowed }.
+    getStatus: () => ipcRenderer.invoke('sync:getStatus'),
+    // Triggers a push using credentials stored in the DB — the renderer
+    // never needs to handle the sync key directly.
+    pushNow: () => ipcRenderer.invoke('sync:pushNow'),
   },
 
   // ============================================

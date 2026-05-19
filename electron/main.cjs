@@ -2217,6 +2217,22 @@ async function buildSyncPayload() {
   };
 }
 
+// Record the outcome of every sync attempt — success OR failure — so the UI
+// can render a fresh status banner. Without this, silent network failures
+// look identical to "app working fine" and the user discovers them weeks later.
+function recordSyncOutcome(kind, ok, errorMessage) {
+  try {
+    const now = new Date().toISOString();
+    settingsDb.setSetting('last_sync_attempt_at', now);
+    settingsDb.setSetting('last_sync_attempt_kind', kind); // 'push' | 'pull'
+    settingsDb.setSetting('last_sync_attempt_ok', ok ? '1' : '0');
+    settingsDb.setSetting('last_sync_error', ok ? '' : (errorMessage || 'Unknown error'));
+  } catch (e) {
+    // Never let status bookkeeping crash a sync cycle
+    console.warn('[sync] could not record outcome:', e.message);
+  }
+}
+
 async function autoSyncPush() {
   if (autoSyncPushing) return;
   // In dev mode, auto-sync is disabled so editing the app on a dev machine
@@ -2226,7 +2242,10 @@ async function autoSyncPush() {
   try {
     const serverUrl = settingsDb.getSetting('cloud_server_url');
     const syncKey = settingsDb.getSetting('cloud_sync_key');
-    if (!serverUrl || !syncKey) return; // Not configured
+    if (!serverUrl || !syncKey) {
+      recordSyncOutcome('push', false, 'Not configured: cloud_server_url or cloud_sync_key missing');
+      return;
+    }
 
     autoSyncPushing = true;
     console.log('[auto-sync] Pushing to cloud...');
@@ -2242,11 +2261,14 @@ async function autoSyncPush() {
     const result = await response.json();
     if (result.success) {
       settingsDb.setSetting('last_sync_push', new Date().toISOString());
+      recordSyncOutcome('push', true);
       console.log('[auto-sync] Push complete:', result.counts);
     } else {
+      recordSyncOutcome('push', false, result.error || `HTTP ${response.status}`);
       console.log('[auto-sync] Push failed:', result.error);
     }
   } catch (err) {
+    recordSyncOutcome('push', false, err.message);
     console.log('[auto-sync] Error:', err.message);
   } finally {
     autoSyncPushing = false;
@@ -2949,7 +2971,10 @@ async function autoSyncPull() {
   try {
     const serverUrl = settingsDb.getSetting('cloud_server_url');
     const syncKey = settingsDb.getSetting('cloud_sync_key');
-    if (!serverUrl || !syncKey) return;
+    if (!serverUrl || !syncKey) {
+      recordSyncOutcome('pull', false, 'Not configured: cloud_server_url or cloud_sync_key missing');
+      return;
+    }
 
     autoSyncPulling = true;
     const lastPull = settingsDb.getSetting('last_sync_pull') || '1970-01-01T00:00:00.000Z';
@@ -2957,7 +2982,10 @@ async function autoSyncPull() {
       headers: { 'X-Sync-Key': syncKey }
     });
     const data = await response.json();
-    if (!data.success) return;
+    if (!data.success) {
+      recordSyncOutcome('pull', false, data.error || `HTTP ${response.status}`);
+      return;
+    }
 
     const sales = data.sales || [];
     const payments = data.payments || [];
@@ -3012,11 +3040,13 @@ async function autoSyncPull() {
     }
 
     settingsDb.setSetting('last_sync_pull', new Date().toISOString());
+    recordSyncOutcome('pull', true);
     console.log(`[auto-sync] Pull: clients ${impCli}/${skpCli}/${fldCli}, suppliers ${impSup}/${skpSup}/${fldSup}, sales ${impSale}/${skpSale}/${fldSale}, payments ${impPay}/${skpPay}/${fldPay}, supplier_payments ${impSP}/${skpSP}/${fldSP} (imported/skipped/failed)`);
     if (impCli > 0 || impSale > 0 || impPay > 0 || impSup > 0 || impSP > 0) {
       emitDataChanged('sales', 'clients', 'products', 'suppliers');
     }
   } catch (err) {
+    recordSyncOutcome('pull', false, err.message);
     console.error('[auto-sync] Pull error:', err.message);
   } finally {
     autoSyncPulling = false;
@@ -3052,10 +3082,63 @@ ipcMain.handle('sync:push', async (_, serverUrl, syncKey) => {
     const result = await response.json();
     if (result.success) {
       settingsDb.setSetting('last_sync_push', new Date().toISOString());
+      recordSyncOutcome('push', true);
+    } else {
+      recordSyncOutcome('push', false, result.error || `HTTP ${response.status}`);
     }
     return result;
   } catch (error) {
+    recordSyncOutcome('push', false, error.message);
     return { success: false, error: error.message };
+  }
+});
+
+// Manual push triggered from the UI — reads credentials from DB so the
+// renderer never needs to handle the sync key.
+ipcMain.handle('sync:pushNow', async () => {
+  await autoSyncPush();
+  // Return fresh status so the UI can update in one round-trip.
+  try {
+    const get = (k) => settingsDb.getSetting(k) || null;
+    return {
+      success: true,
+      data: {
+        last_sync_push: get('last_sync_push'),
+        last_sync_attempt_at: get('last_sync_attempt_at'),
+        last_sync_attempt_ok: get('last_sync_attempt_ok') === '1',
+        last_sync_error: get('last_sync_error') || '',
+      }
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
+});
+
+// Aggregated sync status — read by the SyncStatusIndicator UI to decide what
+// color/text to show. Always returns a successful payload; missing settings
+// surface as nulls/empty strings rather than errors so the UI never crashes.
+ipcMain.handle('sync:getStatus', () => {
+  try {
+    const get = (k) => settingsDb.getSetting(k) || null;
+    return {
+      success: true,
+      data: {
+        configured: !!(get('cloud_server_url') && get('cloud_sync_key')),
+        cloud_server_url: get('cloud_server_url'),
+        last_sync_push: get('last_sync_push'),
+        last_sync_pull: get('last_sync_pull'),
+        last_sync_attempt_at: get('last_sync_attempt_at'),
+        last_sync_attempt_kind: get('last_sync_attempt_kind'),
+        // last_sync_attempt_ok stored as '1'/'0' strings; coerce to bool for the UI
+        last_sync_attempt_ok: get('last_sync_attempt_ok') === '1',
+        last_sync_error: get('last_sync_error') || '',
+        // Surface dev-mode + override state so the UI can explain "why is push idle?"
+        dev_mode: isDev,
+        dev_sync_allowed: process.env.ALLOW_DEV_SYNC === '1',
+      }
+    };
+  } catch (e) {
+    return { success: false, error: e.message };
   }
 });
 
