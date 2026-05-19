@@ -21,11 +21,26 @@ import { useNotification } from '../contexts/NotificationContext';
 import { useAuth } from '../contexts/AuthContext';
 import CustomSelect from '../components/CustomSelect';
 
+// Maps the English seed category names to translation keys so the UI displays
+// them in the active language. Custom user-created categories fall through.
+const CATEGORY_KEY_BY_NAME = {
+  'Dates':              'catDates',
+  'Sugar & Sweeteners': 'catSugarSweeteners',
+  'Chocolate':          'catChocolate',
+  'Nuts & Fillings':    'catNutsFillings',
+  'Packaging':          'catPackaging',
+  'Other Ingredients':  'catOtherIngredients',
+};
+
 const Stock = () => {
   const { t } = useLanguage();
   const { showNotification } = useNotification();
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
+  const translateCategoryName = (name) => {
+    const key = CATEGORY_KEY_BY_NAME[name];
+    return key ? t(key) : name;
+  };
   const [stockItems, setStockItems] = useState([]);
   const [categories, setCategories] = useState([]);
   const [suppliers, setSuppliers] = useState([]);
@@ -262,7 +277,7 @@ const Stock = () => {
         <CustomSelect
           value={selectedCategory}
           onChange={(val) => setSelectedCategory(val)}
-          options={categories.map(cat => ({ value: cat.id, label: cat.name }))}
+          options={categories.map(cat => ({ value: cat.id, label: translateCategoryName(cat.name) }))}
           placeholder={t('allCategories')}
         />
 
@@ -359,7 +374,7 @@ const Stock = () => {
                   </td>
                   <td className="px-6 py-4">
                     <span className="px-3 py-1 rounded-lg bg-dark-700/50 text-dark-300 text-sm">
-                      {item.category_name || t('uncategorized')}
+                      {item.category_name ? translateCategoryName(item.category_name) : t('uncategorized')}
                     </span>
                   </td>
                   <td className="px-6 py-4 text-right">

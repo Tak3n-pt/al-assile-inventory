@@ -110,12 +110,14 @@ const productsQueries = (db) => ({
 
   addProduct: (data) => {
     return db.prepare(`
-      INSERT INTO products (name, description, selling_price, manual_cost, unit, barcode, is_favorite, image_path, is_resale, purchase_price)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO products (name, description, selling_price, selling_price2, selling_price3, manual_cost, unit, barcode, is_favorite, image_path, is_resale, purchase_price)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       data.name,
       data.description || null,
       data.selling_price || 0,
+      data.selling_price2 != null && data.selling_price2 !== '' ? parseFloat(data.selling_price2) : null,
+      data.selling_price3 != null && data.selling_price3 !== '' ? parseFloat(data.selling_price3) : null,
       data.manual_cost || null,
       data.unit || 'pcs',
       data.barcode || null,
@@ -132,6 +134,8 @@ const productsQueries = (db) => ({
         name = ?,
         description = ?,
         selling_price = ?,
+        selling_price2 = ?,
+        selling_price3 = ?,
         manual_cost = ?,
         unit = ?,
         barcode = ?,
@@ -144,6 +148,8 @@ const productsQueries = (db) => ({
       data.name,
       data.description || null,
       data.selling_price || 0,
+      data.selling_price2 != null && data.selling_price2 !== '' ? parseFloat(data.selling_price2) : null,
+      data.selling_price3 != null && data.selling_price3 !== '' ? parseFloat(data.selling_price3) : null,
       data.manual_cost || null,
       data.unit || 'pcs',
       data.barcode || null,

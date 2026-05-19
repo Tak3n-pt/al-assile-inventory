@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
-  Warehouse, Plus, Search, Edit2, Trash2, Play, Package,
+  Warehouse, Plus, Search, Edit2, Trash2, Package,
   TrendingUp, Factory, AlertTriangle, DollarSign, Clock, ShoppingCart
 } from 'lucide-react';
 import PageHeader from '../components/PageHeader';
@@ -34,13 +34,7 @@ const Inventory = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState(null);
   const [deleteConfirm, setDeleteConfirm] = useState(null);
-  const [productionModal, setProductionModal] = useState(null);
-  const [productionData, setProductionData] = useState({
-    quantity: '',
-    expense_allocation: '',
-    date: new Date().toISOString().split('T')[0],
-    notes: ''
-  });
+  // Production is now handled inline in ProductModal — no separate batch modal needed.
 
   // Resale stock modal
   const [resaleStockModal, setResaleStockModal] = useState(null);
@@ -75,38 +69,53 @@ const Inventory = () => {
     setLoading(false);
   };
 
-  const handleSaveProduct = async ({ product, recipe }) => {
+  const handleSaveProduct = async ({ product, recipe, batch }) => {
     try {
-      console.log('Saving product:', product, 'Recipe:', recipe);
+      let productId;
+
       if (editingProduct) {
-        // Clean up old image if it changed
         const oldImage = editingProduct.image_path;
         if (oldImage && oldImage !== product.image_path) {
           await window.api.products.deleteImage(oldImage);
         }
         const result = await window.api.products.update(editingProduct.id, product);
-        console.log('Update result:', result);
-        if (result.success) {
-          await window.api.products.setRecipe(editingProduct.id, recipe);
-          await loadData();
-          setIsModalOpen(false);
-          setEditingProduct(null);
-        } else {
+        if (!result.success) {
           showNotification('Failed to update: ' + (result.error || 'Unknown error'), 'error');
+          return;
         }
+        await window.api.products.setRecipe(editingProduct.id, recipe);
+        productId = editingProduct.id;
       } else {
         const result = await window.api.products.add(product);
-        console.log('Add result:', result);
-        if (result.success) {
-          if (recipe.length > 0) {
-            await window.api.products.setRecipe(result.data.lastInsertRowid, recipe);
-          }
-          await loadData();
-          setIsModalOpen(false);
-        } else {
+        if (!result.success) {
           showNotification('Failed to add: ' + (result.error || 'Unknown error'), 'error');
+          return;
+        }
+        productId = result.data.lastInsertRowid;
+        if (recipe.length > 0) {
+          await window.api.products.setRecipe(productId, recipe);
         }
       }
+
+      // Inline production — create a batch right away if the modal asked for it.
+      // Recipe is already saved above, so createBatch will read it and deduct stock.
+      if (batch && productId) {
+        const batchResult = await window.api.batches.create({
+          product_id:         productId,
+          quantity_produced:  batch.quantity_produced,
+          expense_allocation: batch.expense_allocation,
+          date:               batch.date,
+          notes:              batch.notes,
+        });
+        if (!batchResult.success) {
+          // Product is saved at this point — surface the production failure separately
+          showNotification(`${t('productSavedButProductionFailed') || 'Product saved, but production failed'}: ${batchResult.error || 'Unknown error'}`, 'error');
+        }
+      }
+
+      await loadData();
+      setIsModalOpen(false);
+      setEditingProduct(null);
     } catch (error) {
       console.error('Error saving product:', error);
       showNotification('Error: ' + error.message, 'error');
@@ -122,36 +131,6 @@ const Inventory = () => {
       }
     } catch (error) {
       console.error('Error deleting product:', error);
-    }
-  };
-
-  const handleStartProduction = async () => {
-    if (!productionModal || !productionData.quantity) return;
-
-    try {
-      const result = await window.api.batches.create({
-        product_id: productionModal.id,
-        quantity_produced: parseFloat(productionData.quantity),
-        expense_allocation: parseFloat(productionData.expense_allocation) || 0,
-        date: productionData.date,
-        notes: productionData.notes
-      });
-
-      if (result.success) {
-        await loadData();
-        setProductionModal(null);
-        setProductionData({
-          quantity: '',
-          expense_allocation: '',
-          date: new Date().toISOString().split('T')[0],
-          notes: ''
-        });
-      } else {
-        showNotification(result.error, 'error');
-      }
-    } catch (error) {
-      console.error('Error starting production:', error);
-      showNotification('Error: ' + error.message, 'error');
     }
   };
 
@@ -389,7 +368,7 @@ const Inventory = () => {
                     </div>
                     {isAdmin && (
                       <div className="flex items-center gap-1">
-                        {product.is_resale ? (
+                        {product.is_resale && (
                           <button
                             onClick={() => {
                               setResaleStockModal(product);
@@ -404,18 +383,11 @@ const Inventory = () => {
                           >
                             <Plus size={16} />
                           </button>
-                        ) : (
-                          <button
-                            onClick={() => setProductionModal(product)}
-                            className="p-2 rounded-lg text-emerald-400 hover:bg-emerald-500/10 transition-colors"
-                            title={t('startProduction')}
-                          >
-                            <Play size={16} />
-                          </button>
                         )}
                         <button
                           onClick={() => handleEditClick(product)}
                           className="p-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-700 transition-colors"
+                          title={product.is_resale ? t('edit') : `${t('editProduct')} / ${t('startProduction')}`}
                         >
                           <Edit2 size={16} />
                         </button>
@@ -570,111 +542,6 @@ const Inventory = () => {
         editItem={editingProduct}
         stockItems={stockItems}
       />
-
-      {/* Production Modal */}
-      <AnimatePresence>
-        {productionModal && (
-          <motion.div
-            className="fixed inset-0 z-50 flex items-center justify-center"
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-          >
-            <div
-              className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-              onClick={() => setProductionModal(null)}
-            />
-            <motion.div
-              className="relative z-10 w-full max-w-md mx-4 bg-dark-900 rounded-2xl border border-dark-700 p-6 max-h-[85vh] overflow-y-auto"
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-            >
-              <div className="flex items-center gap-4 mb-6">
-                <div className="w-12 h-12 rounded-xl bg-emerald-500/10 flex items-center justify-center">
-                  <Factory className="w-6 h-6 text-emerald-500" />
-                </div>
-                <div>
-                  <h3 className="text-lg font-semibold text-white">{t('startProduction')}</h3>
-                  <p className="text-dark-400 text-sm">{productionModal.name}</p>
-                </div>
-              </div>
-
-              <div className="space-y-4">
-                <div>
-                  <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('quantityToProduce')} *
-                  </label>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={productionData.quantity}
-                    onChange={(e) => setProductionData(prev => ({ ...prev, quantity: e.target.value }))}
-                    placeholder={`${t('numberOfUnits')} ${productionModal.unit}`}
-                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('expenseAllocation')}
-                  </label>
-                  <input
-                    type="text"
-                    inputMode="decimal"
-                    value={productionData.expense_allocation}
-                    onChange={(e) => setProductionData(prev => ({ ...prev, expense_allocation: e.target.value }))}
-                    placeholder={t('expenseAllocationHint')}
-                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('productionDate')}
-                  </label>
-                  <input
-                    type="date"
-                    value={productionData.date}
-                    onChange={(e) => setProductionData(prev => ({ ...prev, date: e.target.value }))}
-                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white focus:outline-none focus:border-emerald-500 transition-colors"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('notes')}
-                  </label>
-                  <textarea
-                    value={productionData.notes}
-                    onChange={(e) => setProductionData(prev => ({ ...prev, notes: e.target.value }))}
-                    placeholder={t('productionNotes')}
-                    rows={2}
-                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors resize-none"
-                  />
-                </div>
-              </div>
-
-              <div className="flex items-center justify-end gap-3 mt-6">
-                <button
-                  onClick={() => setProductionModal(null)}
-                  className="px-4 py-2 rounded-lg text-dark-400 hover:text-white hover:bg-dark-800 transition-colors"
-                >
-                  {t('cancel')}
-                </button>
-                <button
-                  onClick={handleStartProduction}
-                  disabled={!productionData.quantity}
-                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-emerald-500 text-white font-medium hover:bg-emerald-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
-                >
-                  <Play size={16} />
-                  {t('startProduction')}
-                </button>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Resale Stock Modal */}
       <AnimatePresence>

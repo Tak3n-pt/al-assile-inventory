@@ -20,15 +20,29 @@ const StockModal = ({ isOpen, onClose, onSave, editItem, categories, suppliers }
   const [errors, setErrors] = useState({});
 
   const units = [
-    { value: 'kg', label: 'Kilogram (kg)' },
-    { value: 'g', label: 'Gram (g)' },
-    { value: 'L', label: 'Liter (L)' },
-    { value: 'ml', label: 'Milliliter (ml)' },
-    { value: 'pcs', label: 'Pieces (pcs)' },
-    { value: 'box', label: 'Box' },
-    { value: 'pack', label: 'Pack' },
-    { value: 'bottle', label: 'Bottle' },
+    { value: 'kg',     label: t('unitKilogram') },
+    { value: 'g',      label: t('unitGram') },
+    { value: 'L',      label: t('unitLiter') },
+    { value: 'ml',     label: t('unitMilliliter') },
+    { value: 'pcs',    label: t('unitPieces') },
+    { value: 'box',    label: t('unitBox') },
+    { value: 'pack',   label: t('unitPack') },
+    { value: 'bottle', label: t('unitBottle') },
   ];
+
+  // Translate the seed category names; custom user categories fall through unchanged
+  const CATEGORY_KEY_BY_NAME = {
+    'Dates':              'catDates',
+    'Sugar & Sweeteners': 'catSugarSweeteners',
+    'Chocolate':          'catChocolate',
+    'Nuts & Fillings':    'catNutsFillings',
+    'Packaging':          'catPackaging',
+    'Other Ingredients':  'catOtherIngredients',
+  };
+  const translateCategoryName = (name) => {
+    const key = CATEGORY_KEY_BY_NAME[name];
+    return key ? t(key) : name;
+  };
 
   useEffect(() => {
     if (editItem) {
@@ -167,7 +181,7 @@ const StockModal = ({ isOpen, onClose, onSave, editItem, categories, suppliers }
                 <CustomSelect
                   value={formData.category_id}
                   onChange={(val) => handleChange({ target: { name: 'category_id', value: val } })}
-                  options={categories.map(cat => ({ value: cat.id, label: cat.name }))}
+                  options={categories.map(cat => ({ value: cat.id, label: translateCategoryName(cat.name) }))}
                   placeholder={t('selectCategory')}
                   className="w-full"
                 />

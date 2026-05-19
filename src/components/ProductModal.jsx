@@ -1,6 +1,6 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { X, Package, Save, Plus, Trash2, ImagePlus } from 'lucide-react';
+import { X, Package, Save, Plus, Trash2, ImagePlus, Factory, Check, AlertTriangle } from 'lucide-react';
 import { useLanguage } from '../contexts/LanguageContext';
 import CustomSelect from './CustomSelect';
 
@@ -53,7 +53,9 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
   const [formData, setFormData] = useState({
     name: '',
     description: '',
-    selling_price: '',
+    selling_price: '',     // tarif 1 (required)
+    selling_price2: '',    // tarif 2 (optional)
+    selling_price3: '',    // tarif 3 (optional)
     manual_cost: '',
     unit: 'pcs',
     is_resale: false,
@@ -64,6 +66,16 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
 
   const [recipe, setRecipe] = useState([]);
   const [errors, setErrors] = useState({});
+
+  // Inline-production state — lets the user produce a batch right from this modal
+  // instead of opening a second window. produceQty acts as both the batch size and
+  // the "view multiplier" for recipe inputs (totals for N units instead of per-unit).
+  const today = new Date().toISOString().split('T')[0];
+  const [produceQty,    setProduceQty]    = useState('1');
+  const [produceNow,    setProduceNow]    = useState(false);
+  const [produceDate,   setProduceDate]   = useState(today);
+  const [produceExpense, setProduceExpense] = useState('');
+  const [produceNotes,  setProduceNotes]  = useState('');
 
   const units = [
     { value: 'pcs', label: t('unitPieces') },
@@ -90,6 +102,8 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
         name: editItem.name || '',
         description: editItem.description || '',
         selling_price: editItem.selling_price || '',
+        selling_price2: editItem.selling_price2 != null ? editItem.selling_price2 : '',
+        selling_price3: editItem.selling_price3 != null ? editItem.selling_price3 : '',
         manual_cost: editItem.manual_cost || '',
         unit: editItem.unit || 'pcs',
         is_resale: editItem.is_resale === 1 || editItem.is_resale === true,
@@ -114,11 +128,16 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
       } else {
         setRecipe([]);
       }
+      // When editing, default to "just editing the template" — don't auto-produce
+      setProduceQty('1');
+      setProduceNow(false);
     } else {
       setFormData({
         name: '',
         description: '',
         selling_price: '',
+        selling_price2: '',
+        selling_price3: '',
         manual_cost: '',
         unit: 'pcs',
         is_resale: false,
@@ -127,7 +146,14 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
       });
       setImagePreview(null);
       setRecipe([]);
+      // Fresh product: suggest a batch of 30 with produce-now ON, matching the
+      // "I'm making 30 bottles right now using these ingredients" workflow
+      setProduceQty('30');
+      setProduceNow(true);
     }
+    setProduceDate(today);
+    setProduceExpense('');
+    setProduceNotes('');
     setErrors({});
   }, [editItem, isOpen]);
 
@@ -230,28 +256,94 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    if (validate()) {
-      // Filter out empty recipe items and include unit (only for non-resale products)
-      const validRecipe = formData.is_resale ? [] : recipe.filter(item =>
-        item.stock_item_id && item.quantity_needed
-      ).map(item => ({
-        stock_item_id: parseInt(item.stock_item_id),
-        quantity_needed: parseFloat(item.quantity_needed),
-        unit: item.unit || item.stock_unit // Include the selected unit
-      }));
+    if (!validate()) return;
 
-      onSave({
-        product: {
-          ...formData,
-          selling_price: parseFloat(formData.selling_price) || 0,
-          manual_cost: formData.manual_cost ? parseFloat(formData.manual_cost) : null,
-          is_resale: formData.is_resale ? 1 : 0,
-          purchase_price: formData.is_resale ? (parseFloat(formData.purchase_price) || 0) : 0,
-        },
-        recipe: validRecipe
-      });
+    // Recipe is stored per-unit; quantity_needed already holds per-unit values
+    // because onRecipeQtyChange divides batch totals by qtyNum on every edit.
+    const validRecipe = formData.is_resale ? [] : recipe.filter(item =>
+      item.stock_item_id && item.quantity_needed
+    ).map(item => ({
+      stock_item_id: parseInt(item.stock_item_id),
+      quantity_needed: parseFloat(item.quantity_needed),
+      unit: item.unit || item.stock_unit
+    }));
+
+    // Block production if stock is short — fail loud rather than silently letting
+    // the IPC call throw and the user wonder why nothing happened.
+    if (produceNow && stockShortages.length > 0) {
+      const list = stockShortages.map(s => `${s.name} (short ${s.shortage} ${s.unit})`).join(', ');
+      setErrors({ produce: `${t('notEnoughStock') || 'Not enough stock'}: ${list}` });
+      return;
     }
+
+    const batch = (produceNow && !formData.is_resale && qtyNum > 0 && validRecipe.length > 0)
+      ? {
+          quantity_produced:   qtyNum,
+          expense_allocation:  parseFloat(produceExpense) || 0,
+          date:                produceDate,
+          notes:               produceNotes || null,
+        }
+      : null;
+
+    onSave({
+      product: {
+        ...formData,
+        selling_price:  parseFloat(formData.selling_price) || 0,
+        selling_price2: formData.selling_price2 !== '' ? parseFloat(formData.selling_price2) : null,
+        selling_price3: formData.selling_price3 !== '' ? parseFloat(formData.selling_price3) : null,
+        manual_cost:    formData.manual_cost ? parseFloat(formData.manual_cost) : null,
+        is_resale:      formData.is_resale ? 1 : 0,
+        purchase_price: formData.is_resale ? (parseFloat(formData.purchase_price) || 0) : 0,
+      },
+      recipe: validRecipe,
+      batch,
+    });
   };
+
+  // Batch view multiplier — when produceQty > 1 the recipe inputs hold batch
+  // totals (e.g. 30 kg dates for 30 bottles); when it's 1 (default for edit)
+  // they hold per-unit values directly. Internally we always store per-unit.
+  const qtyNum = parseFloat(produceQty) || 1;
+
+  const displayedBatchTotal = (perUnit) => {
+    const n = parseFloat(perUnit);
+    if (isNaN(n)) return '';
+    const total = n * qtyNum;
+    // Trim trailing zeros without losing precision: 30.000 → 30, 0.166 → 0.166
+    return +total.toFixed(4) + '';
+  };
+
+  const onRecipeQtyChange = (index, totalStr) => {
+    if (totalStr === '' || totalStr === '-') {
+      updateRecipeItem(index, 'quantity_needed', '');
+      return;
+    }
+    const total = parseFloat(totalStr);
+    if (isNaN(total)) return;
+    // Store per-unit; qtyNum guards against div-by-zero (defaults to 1)
+    updateRecipeItem(index, 'quantity_needed', total / qtyNum);
+  };
+
+  // Live stock check — only meaningful when actually producing a batch
+  const stockShortages = useMemo(() => {
+    if (!produceNow || qtyNum <= 0 || formData.is_resale) return [];
+    const out = [];
+    for (const item of recipe) {
+      if (!item.stock_item_id || !item.quantity_needed) continue;
+      const stock = stockItems.find(s => s.id === parseInt(item.stock_item_id));
+      if (!stock) continue;
+      const neededInStockUnit = convertUnit(
+        parseFloat(item.quantity_needed) * qtyNum,
+        item.unit || stock.unit,
+        stock.unit
+      );
+      const shortage = neededInStockUnit - (stock.quantity || 0);
+      if (shortage > 0) {
+        out.push({ name: stock.name, shortage: +shortage.toFixed(3), unit: stock.unit });
+      }
+    }
+    return out;
+  }, [recipe, qtyNum, produceNow, stockItems, formData.is_resale]);
 
   const calculateRecipeCost = () => {
     let total = 0;
@@ -419,11 +511,13 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                 </button>
               </div>
 
-              {/* Price, Cost & Unit Row */}
+              {/* Tarif prices — three tiers. Tarif 1 is required; tarif 2 & 3 are
+                  optional. Empty tarif 2/3 means "not available at that tier" so
+                  the mobile sale screen hides it from the per-line selector. */}
               <div className="grid grid-cols-3 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
-                    {t('sellingPriceDZD')}
+                    {t('tarif1') || 'Tarif 1'} *
                   </label>
                   <input
                     type="text"
@@ -437,6 +531,38 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                     } text-white placeholder-dark-500 focus:outline-none focus:border-violet-500 transition-colors`}
                   />
                 </div>
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">
+                    {t('tarif2') || 'Tarif 2'}
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    name="selling_price2"
+                    value={formData.selling_price2}
+                    onChange={handleChange}
+                    placeholder={t('optional') || 'optional'}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-violet-500 transition-colors"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-dark-300 mb-2">
+                    {t('tarif3') || 'Tarif 3'}
+                  </label>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    name="selling_price3"
+                    value={formData.selling_price3}
+                    onChange={handleChange}
+                    placeholder={t('optional') || 'optional'}
+                    className="w-full px-4 py-3 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-violet-500 transition-colors"
+                  />
+                </div>
+              </div>
+
+              {/* Cost & Unit Row */}
+              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-dark-300 mb-2">
                     {formData.is_resale
@@ -484,6 +610,27 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                     <Plus size={14} />
                     {t('addIngredient')}
                   </button>
+                </div>
+
+                {/* Batch view qty — when > 1 the recipe inputs become batch totals */}
+                <div className="flex items-center gap-3 p-3 rounded-xl bg-dark-800/40 border border-dark-700/40">
+                  <Factory size={16} className="text-violet-400 shrink-0" />
+                  <span className="text-sm text-dark-300 whitespace-nowrap">
+                    {t('producingNow') || 'Producing now:'}
+                  </span>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={produceQty}
+                    onChange={(e) => setProduceQty(e.target.value)}
+                    className="w-24 px-3 py-2 rounded-lg bg-dark-700 border border-dark-600 text-white text-sm focus:outline-none focus:border-violet-500"
+                  />
+                  <span className="text-sm text-dark-400">{formData.unit || ''}</span>
+                  {qtyNum > 1 && (
+                    <span className="text-xs text-dark-500 ml-auto">
+                      {t('amountsAreBatchTotals') || 'amounts below are batch totals'}
+                    </span>
+                  )}
                 </div>
 
                 {recipe.length > 0 ? (
@@ -536,8 +683,8 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                             <input
                               type="text"
                               inputMode="decimal"
-                              value={item.quantity_needed}
-                              onChange={(e) => updateRecipeItem(index, 'quantity_needed', e.target.value)}
+                              value={displayedBatchTotal(item.quantity_needed)}
+                              onChange={(e) => onRecipeQtyChange(index, e.target.value)}
                               placeholder={t('qty')}
                               className="w-full px-3 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-violet-500 transition-colors text-sm"
                             />
@@ -553,6 +700,12 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                             disabled={!item.stock_item_id}
                             className="w-20"
                           />
+                          {/* Per-unit hint — only meaningful when batch view multiplier > 1 */}
+                          {qtyNum > 1 && item.quantity_needed && (
+                            <span className="text-xs text-dark-500 whitespace-nowrap ml-1">
+                              = {+parseFloat(item.quantity_needed).toFixed(4)} {item.unit || item.stock_unit}/{formData.unit || ''}
+                            </span>
+                          )}
                           <button
                             type="button"
                             onClick={() => removeRecipeItem(index)}
@@ -587,6 +740,83 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                         ({((parseFloat(formData.selling_price) - recipeCost) / recipeCost * 100).toFixed(1)}%)
                       </p>
                     </div>
+                  )}
+                </div>
+
+                {/* Inline production — toggle deducts stock and creates a batch record on save */}
+                <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <p className="text-white font-medium text-sm flex items-center gap-2">
+                        <Factory size={16} className="text-emerald-400" />
+                        {t('deductStockAndLog') || 'Deduct stock & log production now'}
+                      </p>
+                      <p className="text-dark-400 text-xs mt-0.5">
+                        {t('deductStockAndLogHint') || 'Creates a batch record and deducts ingredients from stock'}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => setProduceNow(p => !p)}
+                      className={`relative w-12 h-6 rounded-full transition-colors shrink-0 ${produceNow ? 'bg-emerald-500' : 'bg-dark-600'}`}
+                    >
+                      <div className={`absolute top-1 w-4 h-4 rounded-full bg-white transition-transform ${produceNow ? 'translate-x-7' : 'translate-x-1'}`} />
+                    </button>
+                  </div>
+
+                  {produceNow && (
+                    <>
+                      {/* Stock check feedback */}
+                      {recipe.some(r => r.stock_item_id && r.quantity_needed) && (
+                        stockShortages.length === 0 ? (
+                          <div className="flex items-center gap-2 text-emerald-400 text-sm">
+                            <Check size={16} />
+                            {t('enoughStockFor') || 'Enough stock for'} {qtyNum} {formData.unit || ''}
+                          </div>
+                        ) : (
+                          <div className="flex items-start gap-2 text-red-400 text-sm">
+                            <AlertTriangle size={16} className="mt-0.5 shrink-0" />
+                            <div>
+                              <p>{t('notEnoughStock') || 'Not enough stock'}:</p>
+                              {stockShortages.map(s => (
+                                <p key={s.name} className="text-xs">• {s.name} — {t('short') || 'short'} {s.shortage} {s.unit}</p>
+                              ))}
+                            </div>
+                          </div>
+                        )
+                      )}
+
+                      <div className="grid grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-xs font-medium text-dark-400 mb-1.5">
+                            {t('productionDate') || 'Date'}
+                          </label>
+                          <input
+                            type="date"
+                            value={produceDate}
+                            onChange={(e) => setProduceDate(e.target.value)}
+                            className="w-full px-3 py-2 rounded-lg bg-dark-800 border border-dark-700 text-white text-sm focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-xs font-medium text-dark-400 mb-1.5">
+                            {t('expenseAllocation') || 'Expense allocation'}
+                          </label>
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={produceExpense}
+                            onChange={(e) => setProduceExpense(e.target.value)}
+                            placeholder="0"
+                            className="w-full px-3 py-2 rounded-lg bg-dark-800 border border-dark-700 text-white text-sm focus:outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+
+                      {errors.produce && (
+                        <p className="text-red-400 text-xs">{errors.produce}</p>
+                      )}
+                    </>
                   )}
                 </div>
               </div>
@@ -637,8 +867,10 @@ const ProductModal = ({ isOpen, onClose, onSave, editItem, stockItems }) => {
                 type="submit"
                 className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-violet-500 to-purple-500 text-white font-semibold hover:shadow-lg hover:shadow-violet-500/25 transition-all"
               >
-                <Save size={18} />
-                {editItem ? t('update') : t('createProduct')}
+                {produceNow && !formData.is_resale && qtyNum > 0 ? <Factory size={18} /> : <Save size={18} />}
+                {produceNow && !formData.is_resale && qtyNum > 0
+                  ? `${t('saveAndProduce') || 'Save & Produce'} ${qtyNum}`
+                  : (editItem ? t('update') : t('createProduct'))}
               </button>
             </div>
           </form>

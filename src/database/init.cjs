@@ -206,6 +206,16 @@ const initDatabase = (db) => {
     db.exec(`ALTER TABLE products ADD COLUMN is_resale INTEGER DEFAULT 0`);
   }
 
+  // Migration: Add tier-2 and tier-3 prices (tarif 2, tarif 3 — optional).
+  // selling_price is tarif 1. Null in price2/price3 means "not available at that tarif"
+  // so the mobile sale screen hides those tarifs for products that don't offer them.
+  if (!columnExists('products', 'selling_price2')) {
+    db.exec(`ALTER TABLE products ADD COLUMN selling_price2 REAL DEFAULT NULL`);
+  }
+  if (!columnExists('products', 'selling_price3')) {
+    db.exec(`ALTER TABLE products ADD COLUMN selling_price3 REAL DEFAULT NULL`);
+  }
+
   // Migration: Add purchase_price column for resale products
   if (!columnExists('products', 'purchase_price')) {
     db.exec(`ALTER TABLE products ADD COLUMN purchase_price REAL DEFAULT 0`);
