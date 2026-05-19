@@ -56,6 +56,12 @@ const HighlightedText = ({ text, query, className = '' }) => {
   );
 };
 
+const getProductPrice = (sp1, sp2, sp3, tarif) => {
+  if (tarif === 2 && (sp2 || 0) > 0) return sp2;
+  if (tarif === 3 && (sp3 || 0) > 0) return sp3;
+  return sp1 || 0;
+};
+
 // ============================================
 // CART ITEM COMPONENT
 // ============================================
@@ -1245,6 +1251,8 @@ const Sales = () => {
   const [showPostSaleChooser, setShowPostSaleChooser] = useState(false);
   const [selectedDocType, setSelectedDocType] = useState('invoice');
   const [settings, setSettings] = useState({});
+  const [selectedTarif, setSelectedTarif] = useState(1);
+  const selectedTarifRef = useRef(1);
 
   // Load data
   useEffect(() => {
@@ -1601,16 +1609,20 @@ const Sales = () => {
         return updated;
       }
       outcome = 'added';
+      const price = getProductPrice(product.selling_price || 0, product.selling_price2 || 0, product.selling_price3 || 0, selectedTarifRef.current);
       return [...prevCart, {
         // Include a random suffix so two adds in the same millisecond (fast scanner
         // or automated test) don't collide on React's key — Date.now() alone can repeat.
         id: Date.now() + Math.random(),
         product_id: product.id,
         name: product.name,
-        unit_price: product.selling_price,
+        unit_price: price,
         quantity: 1,
-        total: roundMoney(product.selling_price),
+        total: roundMoney(price),
         maxQuantity: availableQty,
+        sp1: product.selling_price || 0,
+        sp2: product.selling_price2 || 0,
+        sp3: product.selling_price3 || 0,
       }];
     });
     // Keep scanner input focused after any add (click or scan) so the next scan
@@ -1643,6 +1655,16 @@ const Sales = () => {
   // Remove from cart
   const removeFromCart = (itemId) => {
     setCart(prevCart => prevCart.filter(item => item.id !== itemId));
+  };
+
+  const changeTarif = (n) => {
+    const tarif = (n === 1 || n === 2 || n === 3) ? n : 1;
+    selectedTarifRef.current = tarif;
+    setSelectedTarif(tarif);
+    setCart(prev => prev.map(item => {
+      const price = getProductPrice(item.sp1 ?? item.unit_price, item.sp2 ?? 0, item.sp3 ?? 0, tarif);
+      return { ...item, unit_price: price, total: roundMoney(price * item.quantity) };
+    }));
   };
 
   // Toggle favorite
@@ -2111,6 +2133,26 @@ const Sales = () => {
                 {t('clear')}
               </button>
             )}
+          </div>
+
+          {/* Tarif Selector */}
+          <div className="flex items-center gap-2 px-4 py-2 border-b border-dark-700/50">
+            <span className="text-xs text-dark-400 font-medium">{t('tarif') || 'Tarif'}</span>
+            <div className="flex gap-1">
+              {[1, 2, 3].map(n => (
+                <button
+                  key={n}
+                  onClick={() => changeTarif(n)}
+                  className={`px-3 py-1 rounded-lg text-sm font-semibold transition-all ${
+                    selectedTarif === n
+                      ? 'bg-emerald-500 text-white shadow-md'
+                      : 'bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-white'
+                  }`}
+                >
+                  T{n}
+                </button>
+              ))}
+            </div>
           </div>
 
           {/* Cart Items */}
