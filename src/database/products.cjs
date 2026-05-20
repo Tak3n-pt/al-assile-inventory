@@ -127,13 +127,17 @@ const productsQueries = (db) => ({
 
   toggleFavorite: (id) => {
     return db.prepare(`
-      UPDATE products SET is_favorite = CASE WHEN is_favorite = 1 THEN 0 ELSE 1 END
+      UPDATE products
+      SET is_favorite = CASE WHEN is_favorite = 1 THEN 0 ELSE 1 END,
+          updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(id);
   },
 
   updateBarcode: (id, barcode) => {
-    return db.prepare(`UPDATE products SET barcode = ? WHERE id = ?`).run(barcode, id);
+    return db.prepare(`
+      UPDATE products SET barcode = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+    `).run(barcode, id);
   },
 
   addProduct: (data) => {
@@ -170,7 +174,8 @@ const productsQueries = (db) => ({
         is_favorite = ?,
         image_path = ?,
         is_resale = ?,
-        purchase_price = ?
+        purchase_price = ?,
+        updated_at = CURRENT_TIMESTAMP
       WHERE id = ?
     `).run(
       data.name,
@@ -464,7 +469,7 @@ const productsQueries = (db) => ({
       }
 
       // Increase product quantity
-      db.prepare(`UPDATE products SET quantity = quantity + ? WHERE id = ?`)
+      db.prepare(`UPDATE products SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
         .run(data.quantity_produced, data.product_id);
 
       return result;
@@ -582,7 +587,7 @@ const productsQueries = (db) => ({
       // 6. Adjust product quantity by the difference
       const quantityDiff = data.quantity_produced - oldBatch.quantity_produced;
       if (quantityDiff !== 0) {
-        db.prepare(`UPDATE products SET quantity = quantity + ? WHERE id = ?`)
+        db.prepare(`UPDATE products SET quantity = quantity + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
           .run(quantityDiff, oldBatch.product_id);
       }
 
@@ -634,7 +639,7 @@ const productsQueries = (db) => ({
         );
       }
 
-      db.prepare(`UPDATE products SET quantity = quantity - ? WHERE id = ?`)
+      db.prepare(`UPDATE products SET quantity = quantity - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`)
         .run(batch.quantity_produced, batch.product_id);
 
       return db.prepare(`DELETE FROM production_batches WHERE id = ?`).run(id);

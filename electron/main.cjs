@@ -2174,7 +2174,7 @@ let autoSyncPulling = false;
 // Hard timeout for sync HTTP calls. Without this, a dead cloud server could
 // keep a fetch hanging for Node's default (~300s) and the in-flight flag would
 // stay true the whole time, silently skipping every scheduled cycle.
-const SYNC_HTTP_TIMEOUT_MS = 30_000;
+const SYNC_HTTP_TIMEOUT_MS = 120_000; // 2 min — needed for large image payloads
 function fetchWithTimeout(url, options = {}) {
   const ctrl = new AbortController();
   const to = setTimeout(() => ctrl.abort(), SYNC_HTTP_TIMEOUT_MS);
@@ -2282,34 +2282,40 @@ async function buildSyncPayload() {
 
 async function autoSyncPush() {
   if (autoSyncPushing) return;
-  // In dev mode, auto-sync is disabled so editing the app on a dev machine
-  // can never overwrite a client's cloud data. Use the Settings → Push button
-  // for deliberate, manual sync tests, or set ALLOW_DEV_SYNC=1 to re-enable.
-  if (isDev && process.env.ALLOW_DEV_SYNC !== '1') return;
   try {
     const serverUrl = settingsDb.getSetting('cloud_server_url');
     const syncKey = settingsDb.getSetting('cloud_sync_key');
-    if (!serverUrl || !syncKey) return; // Not configured
+    if (!serverUrl || !syncKey) return;
 
     autoSyncPushing = true;
     console.log('[auto-sync] Pushing to cloud...');
 
     const payload = await buildSyncPayload();
+    const bodyStr = JSON.stringify(payload);
 
-    const response = await fetchWithTimeout(`${serverUrl}/api/sync/push`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Sync-Key': syncKey },
-      body: JSON.stringify(payload)
-    });
+    let result = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        const response = await fetchWithTimeout(`${serverUrl}/api/sync/push`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Sync-Key': syncKey },
+          body: bodyStr,
+        });
+        result = await response.json();
+        break; // success — stop retrying
+      } catch (fetchErr) {
+        console.log(`[auto-sync] Push attempt ${attempt} failed: ${fetchErr.message}`);
+        if (attempt < 3) await new Promise(r => setTimeout(r, 5000));
+      }
+    }
 
-    const result = await response.json();
-    if (result.success) {
+    if (result && result.success) {
       settingsDb.setSetting('last_sync_push', new Date().toISOString());
       console.log('[auto-sync] Push complete:', result.counts);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('sync:status', { ok: true, type: 'push' });
       }
-    } else {
+    } else if (result) {
       console.log('[auto-sync] Push failed:', result.error);
     }
   } catch (err) {
@@ -2499,6 +2505,127 @@ function resolveMobileClientId(mobileClientId) {
   // the same everywhere.
   const direct = db.prepare('SELECT id FROM clients WHERE id = ?').get(mobileClientId);
   return direct ? direct.id : null;
+}
+
+// Import a mobile-originated product/profile edit. Products use the same id
+// namespace in the current sync contract: desktop pushes explicit ids to the
+// server, and a website-created product uses the next server id until desktop
+// imports it. We import products before sales so mobile sales can reference
+// products created on the website in the same pull batch.
+function importRemoteProduct(product) {
+  try {
+    if (!product || product.id == null) {
+      return { ok: false, skipped: true, error: 'no id on product payload' };
+    }
+
+    const id = Number(product.id);
+    if (!Number.isInteger(id) || id < 1) {
+      return { ok: false, skipped: true, error: 'invalid product id on payload' };
+    }
+
+    const action = product.__action || 'update';
+    const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(id);
+
+    // Mobile delete is normally a soft-delete update (is_active=0), but keep a
+    // tombstone branch for compatibility with any older/future server payload.
+    if (action === 'delete') {
+      if (!existing) return { ok: true, skipped: true };
+      db.prepare(`
+        UPDATE products
+        SET is_active = 0, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+      `).run(id);
+      return { ok: true, skipped: false, localId: id };
+    }
+
+    const values = {
+      name: product.name ? String(product.name).trim() : null,
+      description: product.description || null,
+      selling_price: Number(product.selling_price) || 0,
+      selling_price2: product.selling_price2 != null ? Number(product.selling_price2) || 0 : null,
+      selling_price3: product.selling_price3 != null ? Number(product.selling_price3) || 0 : null,
+      unit: product.unit || 'pcs',
+      barcode: product.barcode || null,
+      is_favorite: product.is_favorite ? 1 : 0,
+      is_active: product.is_active === undefined ? 1 : (product.is_active ? 1 : 0),
+      quantity: Number(product.quantity) || 0,
+      min_stock_alert: Number(product.min_stock_alert) || 0,
+      is_resale: product.is_resale ? 1 : 0,
+      purchase_price: Number(product.purchase_price) || 0,
+      created_at: product.created_at || new Date().toISOString(),
+      updated_at: product.updated_at || new Date().toISOString(),
+    };
+
+    if (!values.name) {
+      return { ok: false, skipped: true, error: 'product name is required' };
+    }
+
+    if (existing) {
+      db.prepare(`
+        UPDATE products SET
+          name = ?,
+          description = ?,
+          selling_price = ?,
+          selling_price2 = ?,
+          selling_price3 = ?,
+          unit = ?,
+          barcode = ?,
+          is_favorite = ?,
+          is_active = ?,
+          quantity = ?,
+          min_stock_alert = ?,
+          is_resale = ?,
+          purchase_price = ?,
+          updated_at = ?
+        WHERE id = ?
+      `).run(
+        values.name,
+        values.description,
+        values.selling_price,
+        values.selling_price2,
+        values.selling_price3,
+        values.unit,
+        values.barcode,
+        values.is_favorite,
+        values.is_active,
+        values.quantity,
+        values.min_stock_alert,
+        values.is_resale,
+        values.purchase_price,
+        values.updated_at,
+        id
+      );
+      return { ok: true, skipped: false, localId: id };
+    }
+
+    db.prepare(`
+      INSERT INTO products
+        (id, name, description, selling_price, selling_price2, selling_price3,
+         unit, barcode, is_favorite, is_active, quantity, min_stock_alert,
+         is_resale, purchase_price, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      id,
+      values.name,
+      values.description,
+      values.selling_price,
+      values.selling_price2,
+      values.selling_price3,
+      values.unit,
+      values.barcode,
+      values.is_favorite,
+      values.is_active,
+      values.quantity,
+      values.min_stock_alert,
+      values.is_resale,
+      values.purchase_price,
+      values.created_at,
+      values.updated_at
+    );
+    return { ok: true, skipped: false, localId: id };
+  } catch (err) {
+    return { ok: false, skipped: false, error: err.message };
+  }
 }
 
 // Import a mobile-originated client. Idempotent via remote_id.
@@ -3034,8 +3161,10 @@ async function autoSyncPull() {
     const clients = data.clients || [];
     const suppliers = data.suppliers || [];
     const supplierPayments = data.supplier_payments || [];
+    const products = data.products || [];
     if (sales.length === 0 && payments.length === 0 && clients.length === 0
-        && suppliers.length === 0 && supplierPayments.length === 0) return;
+        && suppliers.length === 0 && supplierPayments.length === 0
+        && products.length === 0) return;
 
     // Import clients FIRST — sales and payments reference client_id and the
     // resolver needs the remote_id mapping in place before they land.
@@ -3055,6 +3184,16 @@ async function autoSyncPull() {
       if (r.ok && !r.skipped) impSup++;
       else if (r.skipped) skpSup++;
       else { fldSup++; console.warn('[auto-sync] Skipping supplier:', r.error, sup && sup.id); }
+    }
+
+    // Import products BEFORE sales so a mobile sale can reference a product
+    // created on the website in the same pull window.
+    let impProd = 0, skpProd = 0, fldProd = 0;
+    for (const product of products) {
+      const r = importRemoteProduct(product);
+      if (r.ok && !r.skipped) impProd++;
+      else if (r.skipped) skpProd++;
+      else { fldProd++; console.warn('[auto-sync] Skipping product:', r.error, product && product.id); }
     }
 
     let impSale = 0, skpSale = 0, fldSale = 0;
@@ -3082,8 +3221,8 @@ async function autoSyncPull() {
     }
 
     settingsDb.setSetting('last_sync_pull', new Date().toISOString());
-    console.log(`[auto-sync] Pull: clients ${impCli}/${skpCli}/${fldCli}, suppliers ${impSup}/${skpSup}/${fldSup}, sales ${impSale}/${skpSale}/${fldSale}, payments ${impPay}/${skpPay}/${fldPay}, supplier_payments ${impSP}/${skpSP}/${fldSP} (imported/skipped/failed)`);
-    if (impCli > 0 || impSale > 0 || impPay > 0 || impSup > 0 || impSP > 0) {
+    console.log(`[auto-sync] Pull: clients ${impCli}/${skpCli}/${fldCli}, suppliers ${impSup}/${skpSup}/${fldSup}, products ${impProd}/${skpProd}/${fldProd}, sales ${impSale}/${skpSale}/${fldSale}, payments ${impPay}/${skpPay}/${fldPay}, supplier_payments ${impSP}/${skpSP}/${fldSP} (imported/skipped/failed)`);
+    if (impCli > 0 || impSale > 0 || impPay > 0 || impSup > 0 || impSP > 0 || impProd > 0) {
       emitDataChanged('sales', 'clients', 'products', 'suppliers');
     }
   } catch (err) {
@@ -3093,17 +3232,36 @@ async function autoSyncPull() {
   }
 }
 
+// Checks if the remote server has 0 products (e.g. after a redeploy wipes
+// the DB) and immediately pushes if so, without waiting for the normal interval.
+async function pushIfServerEmpty() {
+  try {
+    const serverUrl = settingsDb.getSetting('cloud_server_url');
+    const syncKey   = settingsDb.getSetting('cloud_sync_key');
+    if (!serverUrl || !syncKey) return;
+    const res  = await fetchWithTimeout(`${serverUrl}/api/sync/status`, {
+      headers: { 'X-Sync-Key': syncKey }
+    });
+    const json = await res.json();
+    if (json.success && json.product_count === 0) {
+      console.log('[auto-sync] Server has 0 products — pushing immediately');
+      await autoSyncPush();
+    }
+  } catch { /* network hiccup — ignore */ }
+}
+
 // Start auto-sync after DB is ready.
-// Longer intervals reduce main-process load during active POS use.
 setTimeout(() => {
-  // Push every 5 minutes (products don't change often)
-  setInterval(() => autoSyncPush(), 5 * 60 * 1000);
-  // Pull every 2 minutes (catch mobile sales quickly)
-  setInterval(() => autoSyncPull(), 2 * 60 * 1000);
+  // Push every 1 minute so product/price changes appear on mobile quickly
+  setInterval(() => autoSyncPush(), 1 * 60 * 1000);
+  // Pull every 1 minute (catch mobile sales quickly)
+  setInterval(() => autoSyncPull(), 1 * 60 * 1000);
+  // Check every 30 seconds if remote is empty and push immediately if so
+  setInterval(() => pushIfServerEmpty(), 30 * 1000);
   // Initial sync on startup
   autoSyncPush();
   autoSyncPull();
-  console.log('[auto-sync] Started: push every 5min, pull every 2min');
+  console.log('[auto-sync] Started: push/pull every 1min, empty-server check every 30s');
 }, 10000);
 
 ipcMain.handle('sync:push', async (_, serverUrl, syncKey) => {
@@ -3154,6 +3312,13 @@ ipcMain.handle('sync:pull', async (_, serverUrl, syncKey) => {
       else if (r.skipped) skpSup++;
       else { fldSup++; console.warn('[sync:pull] Skipping supplier:', r.error, sup && sup.id); }
     }
+    let impProd = 0, skpProd = 0, fldProd = 0;
+    for (const product of data.products || []) {
+      const r = importRemoteProduct(product);
+      if (r.ok && !r.skipped) impProd++;
+      else if (r.skipped) skpProd++;
+      else { fldProd++; console.warn('[sync:pull] Skipping product:', r.error, product && product.id); }
+    }
     let impSale = 0, skpSale = 0, fldSale = 0;
     for (const sale of data.sales || []) {
       const r = importRemoteSale(sale);
@@ -3176,14 +3341,15 @@ ipcMain.handle('sync:pull', async (_, serverUrl, syncKey) => {
       else { fldSP++; console.warn('[sync:pull] Skipping supplier_payment:', r.error, sp && sp.id); }
     }
     settingsDb.setSetting('last_sync_pull', new Date().toISOString());
-    if (impSale > 0 || impPay > 0 || impCli > 0 || impSup > 0 || impSP > 0) {
+    if (impSale > 0 || impPay > 0 || impCli > 0 || impSup > 0 || impSP > 0 || impProd > 0) {
       emitDataChanged('sales', 'clients', 'products', 'suppliers');
     }
     return {
       success: true,
-      imported: impSale + impPay + impCli + impSup + impSP,
+      imported: impSale + impPay + impCli + impSup + impSP + impProd,
       clients:           { imported: impCli,  skipped: skpCli,  failed: fldCli },
       suppliers:         { imported: impSup,  skipped: skpSup,  failed: fldSup },
+      products:          { imported: impProd, skipped: skpProd, failed: fldProd },
       sales:             { imported: impSale, skipped: skpSale, failed: fldSale },
       payments:          { imported: impPay,  skipped: skpPay,  failed: fldPay },
       supplier_payments: { imported: impSP,   skipped: skpSP,   failed: fldSP  },

@@ -15,7 +15,19 @@ const assert = require('node:assert/strict');
 const path = require('node:path');
 // Desktop's better-sqlite3 is compiled against Electron's NODE_MODULE_VERSION.
 // Borrow the mobile project's copy which is compiled against plain Node.
-const Database = require(path.resolve(__dirname, '../../inventory-app-mobile/node_modules/better-sqlite3'));
+let Database = null;
+for (const candidate of [
+  path.resolve(__dirname, '../../inventory-app-mobile/node_modules/better-sqlite3'),
+  path.resolve(__dirname, '../../../Desktop/inventory-app-mobile/node_modules/better-sqlite3'),
+]) {
+  try {
+    Database = require(candidate);
+    break;
+  } catch (_) {
+    // Try the next known checkout location.
+  }
+}
+if (!Database) throw new Error('Could not load a plain-Node better-sqlite3 build for tests');
 
 // ---- Schema (matches src/database/init.cjs essentials we touch) ----
 function makeDB() {
@@ -33,7 +45,22 @@ function makeDB() {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE products (
-      id INTEGER PRIMARY KEY, name TEXT NOT NULL, quantity REAL DEFAULT 0
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      selling_price REAL DEFAULT 0,
+      selling_price2 REAL DEFAULT NULL,
+      selling_price3 REAL DEFAULT NULL,
+      unit TEXT DEFAULT 'pcs',
+      barcode TEXT,
+      is_favorite INTEGER DEFAULT 0,
+      is_active INTEGER DEFAULT 1,
+      quantity REAL DEFAULT 0,
+      min_stock_alert REAL DEFAULT 0,
+      is_resale INTEGER DEFAULT 0,
+      purchase_price REAL DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     );
     CREATE TABLE sales (
       id INTEGER PRIMARY KEY,
@@ -126,6 +153,65 @@ function updateSupplierPayment(db, id, data) {
       .run(newAmount, newDate, newNotes, id);
     return { changes: 1 };
   })();
+}
+
+function importRemoteProduct(db, product) {
+  if (!product || product.id == null) return { ok: false, skipped: true, error: 'no id on product payload' };
+  const id = Number(product.id);
+  const existing = db.prepare('SELECT id FROM products WHERE id = ?').get(id);
+  if (product.__action === 'delete') {
+    if (!existing) return { ok: true, skipped: true };
+    db.prepare('UPDATE products SET is_active = 0, updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(id);
+    return { ok: true, skipped: false, localId: id };
+  }
+  const values = {
+    name: product.name ? String(product.name).trim() : null,
+    description: product.description || null,
+    selling_price: Number(product.selling_price) || 0,
+    selling_price2: product.selling_price2 != null ? Number(product.selling_price2) || 0 : null,
+    selling_price3: product.selling_price3 != null ? Number(product.selling_price3) || 0 : null,
+    unit: product.unit || 'pcs',
+    barcode: product.barcode || null,
+    is_favorite: product.is_favorite ? 1 : 0,
+    is_active: product.is_active === undefined ? 1 : (product.is_active ? 1 : 0),
+    quantity: Number(product.quantity) || 0,
+    min_stock_alert: Number(product.min_stock_alert) || 0,
+    is_resale: product.is_resale ? 1 : 0,
+    purchase_price: Number(product.purchase_price) || 0,
+    created_at: product.created_at || new Date().toISOString(),
+    updated_at: product.updated_at || new Date().toISOString(),
+  };
+  if (!values.name) return { ok: false, skipped: true, error: 'product name is required' };
+
+  if (existing) {
+    db.prepare(`
+      UPDATE products SET
+        name = ?, description = ?, selling_price = ?, selling_price2 = ?, selling_price3 = ?,
+        unit = ?, barcode = ?, is_favorite = ?, is_active = ?, quantity = ?,
+        min_stock_alert = ?, is_resale = ?, purchase_price = ?, updated_at = ?
+      WHERE id = ?
+    `).run(
+      values.name, values.description, values.selling_price, values.selling_price2,
+      values.selling_price3, values.unit, values.barcode, values.is_favorite,
+      values.is_active, values.quantity, values.min_stock_alert, values.is_resale,
+      values.purchase_price, values.updated_at, id
+    );
+    return { ok: true, skipped: false, localId: id };
+  }
+
+  db.prepare(`
+    INSERT INTO products
+      (id, name, description, selling_price, selling_price2, selling_price3,
+       unit, barcode, is_favorite, is_active, quantity, min_stock_alert,
+       is_resale, purchase_price, created_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    id, values.name, values.description, values.selling_price, values.selling_price2,
+    values.selling_price3, values.unit, values.barcode, values.is_favorite,
+    values.is_active, values.quantity, values.min_stock_alert, values.is_resale,
+    values.purchase_price, values.created_at, values.updated_at
+  );
+  return { ok: true, skipped: false, localId: id };
 }
 
 const tests = [];
@@ -360,6 +446,40 @@ test('Lifecycle: sale+pay+delete collapsed in one pull → no balance change on 
   // Net desktop balance change: 0 (both tombstones are no-ops)
   const bal = db.prepare('SELECT balance FROM clients WHERE id = 1').get().balance;
   assert.equal(bal, 0, 'no balance change');
+});
+
+// ============================================================================
+// TEST 8 — Website-created product imports before mobile sale references it
+// ============================================================================
+test('importRemoteProduct: creates desktop product with all tarif prices', () => {
+  const db = makeDB();
+  const r = importRemoteProduct(db, {
+    id: 42,
+    __action: 'create',
+    name: 'Mobile Product',
+    description: 'Created on website',
+    selling_price: 100,
+    selling_price2: 200,
+    selling_price3: 300,
+    purchase_price: 70,
+    unit: 'kg',
+    barcode: 'MOB-1',
+    quantity: 12,
+    min_stock_alert: 2,
+    is_resale: 1,
+  });
+  assert.equal(r.ok, true);
+  assert.equal(r.skipped, false);
+
+  const row = db.prepare('SELECT * FROM products WHERE id = 42').get();
+  assert.equal(row.name, 'Mobile Product');
+  assert.equal(row.selling_price, 100);
+  assert.equal(row.selling_price2, 200);
+  assert.equal(row.selling_price3, 300);
+  assert.equal(row.purchase_price, 70);
+  assert.equal(row.unit, 'kg');
+  assert.equal(row.quantity, 12);
+  assert.equal(row.is_resale, 1);
 });
 
 // ============================================================================
