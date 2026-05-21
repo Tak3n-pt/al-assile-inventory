@@ -67,7 +67,21 @@ const SaleModal = ({ isOpen, onClose, onSave, editItem, clients, products }) => 
   };
 
   const addItem = () => {
-    setItems(prev => [...prev, { product_id: '', quantity: '', unit_price: '' }]);
+    setItems(prev => [...prev, { product_id: '', quantity: '', unit_price: '', tarif: 1 }]);
+  };
+
+  const priceForTarif = (product, tarif) => {
+    if (!product) return '';
+    const prices = [product.selling_price, product.selling_price2, product.selling_price3];
+    const p = prices[(tarif || 1) - 1];
+    return (p != null && p > 0) ? p : '';
+  };
+
+  const firstAvailableTarif = (product) => {
+    if (!product) return 1;
+    const prices = [product.selling_price, product.selling_price2, product.selling_price3];
+    const idx = prices.findIndex(p => p != null && p > 0);
+    return idx >= 0 ? idx + 1 : 1;
   };
 
   const updateItem = (index, field, value) => {
@@ -75,15 +89,22 @@ const SaleModal = ({ isOpen, onClose, onSave, editItem, clients, products }) => 
       const updated = [...prev];
       updated[index] = { ...updated[index], [field]: value };
 
-      // If product changed, update the price
       if (field === 'product_id') {
         const product = products.find(p => p.id === parseInt(value));
         if (product) {
-          updated[index].unit_price = product.selling_price;
+          const tarif = firstAvailableTarif(product);
+          updated[index].tarif = tarif;
+          updated[index].unit_price = priceForTarif(product, tarif);
           updated[index].product_name = product.name;
           updated[index].product_unit = product.unit;
         }
       }
+
+      if (field === 'tarif') {
+        const product = products.find(p => p.id === parseInt(updated[index].product_id));
+        updated[index].unit_price = priceForTarif(product, value);
+      }
+
       return updated;
     });
   };
@@ -280,53 +301,81 @@ const SaleModal = ({ isOpen, onClose, onSave, editItem, clients, products }) => 
 
               {items.length > 0 ? (
                 <div className="space-y-2">
-                  {items.map((item, index) => (
-                    <div key={index} className="flex items-center gap-3">
-                      <CustomSelect
-                        value={item.product_id}
-                        onChange={(val) => updateItem(index, 'product_id', val)}
-                        options={products.map(product => ({
-                          value: product.id,
-                          label: `${product.name} - ${product.selling_price} DZD/${product.unit}`
-                        }))}
-                        placeholder={t('selectProductPlaceholder')}
-                        className="flex-1"
-                      />
-                      <div className="w-24">
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          value={item.quantity}
-                          onChange={(e) => updateItem(index, 'quantity', e.target.value)}
-                          placeholder={t('qty')}
-                          className="w-full px-3 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
+                  {items.map((item, index) => {
+                    const product = products.find(p => p.id === parseInt(item.product_id));
+                    const availableTarifs = product ? [
+                      { n: 1, price: product.selling_price },
+                      { n: 2, price: product.selling_price2 },
+                      { n: 3, price: product.selling_price3 },
+                    ].filter(t => t.price != null && t.price > 0) : [];
+                    return (
+                      <div key={index} className="flex items-center gap-2 flex-wrap">
+                        <CustomSelect
+                          value={item.product_id}
+                          onChange={(val) => updateItem(index, 'product_id', val)}
+                          options={products.map(p => ({
+                            value: p.id,
+                            label: p.name + (p.unit ? ` (${p.unit})` : '')
+                          }))}
+                          placeholder={t('selectProductPlaceholder')}
+                          className="flex-1 min-w-[180px]"
                         />
+                        {/* Tarif selector — only shown when product has multiple price tiers */}
+                        {availableTarifs.length > 1 && (
+                          <div className="flex gap-1">
+                            {availableTarifs.map(({ n, price }) => (
+                              <button
+                                key={n}
+                                type="button"
+                                onClick={() => updateItem(index, 'tarif', n)}
+                                title={`Tarif ${n}: ${price} DZD`}
+                                className={`px-2 py-2 rounded-lg text-xs font-bold transition-colors ${
+                                  (item.tarif || 1) === n
+                                    ? 'bg-emerald-500 text-white'
+                                    : 'bg-dark-700 text-dark-400 hover:text-white'
+                                }`}
+                              >
+                                T{n}
+                              </button>
+                            ))}
+                          </div>
+                        )}
+                        <div className="w-24">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={item.quantity}
+                            onChange={(e) => updateItem(index, 'quantity', e.target.value)}
+                            placeholder={t('qty')}
+                            className="w-full px-3 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
+                          />
+                        </div>
+                        <div className="w-28">
+                          <input
+                            type="text"
+                            inputMode="decimal"
+                            value={item.unit_price}
+                            onChange={(e) => updateItem(index, 'unit_price', e.target.value)}
+                            placeholder={t('price')}
+                            className="w-full px-3 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
+                          />
+                        </div>
+                        <span className="w-24 text-right text-dark-300 text-sm">
+                          {item.quantity && item.unit_price
+                            ? (parseFloat(item.quantity) * parseFloat(item.unit_price)).toFixed(2)
+                            : '0.00'
+                          } DZD
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => removeItem(index)}
+                          className="p-2 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
+                        >
+                          <Trash2 size={16} />
+                        </button>
                       </div>
-                      <div className="w-32">
-                        <input
-                          type="text"
-                          inputMode="decimal"
-                          value={item.unit_price}
-                          onChange={(e) => updateItem(index, 'unit_price', e.target.value)}
-                          placeholder={t('price')}
-                          className="w-full px-3 py-2.5 rounded-xl bg-dark-800 border border-dark-700 text-white placeholder-dark-500 focus:outline-none focus:border-emerald-500 transition-colors"
-                        />
-                      </div>
-                      <span className="w-24 text-right text-dark-300">
-                        {item.quantity && item.unit_price
-                          ? (parseFloat(item.quantity) * parseFloat(item.unit_price)).toFixed(2)
-                          : '0.00'
-                        } DZD
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => removeItem(index)}
-                        className="p-2 rounded-lg text-dark-400 hover:text-red-400 hover:bg-red-500/10 transition-colors"
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               ) : (
                 <div className="text-center py-8 rounded-xl bg-dark-800/30 border border-dark-700/50 border-dashed">
