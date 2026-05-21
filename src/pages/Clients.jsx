@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
@@ -30,7 +30,6 @@ const Clients = () => {
   const [showDebtOnly, setShowDebtOnly] = useState(false);
   const [activeTab, setActiveTab] = useState('clients');
   const [statusFilter, setStatusFilter] = useState('all');
-  const [categoryFilter, setCategoryFilter] = useState('all');
 
   // Modal states
   const [showClientModal, setShowClientModal] = useState(false);
@@ -372,17 +371,16 @@ const Clients = () => {
       (client.email || '').toLowerCase().includes(q) ||
       (client.category_name || '').toLowerCase().includes(q);
     const matchesDebt = !showDebtOnly || (client.outstanding_debt || 0) > 0 || (client.balance || 0) < 0;
-    const matchesCategory = categoryFilter === 'all' || String(client.category_id || '') === String(categoryFilter);
-    return matchesSearch && matchesDebt && matchesCategory;
+    return matchesSearch && matchesDebt;
   });
 
-  const clientCategoryOptions = [
-    { value: 'all', label: t('allClientCategories') },
-    ...clientCategories.map(category => ({
-      value: category.id,
-      label: `${category.name}${category.client_count ? ` (${category.client_count})` : ''}`
-    }))
-  ];
+  const clientGroups = useMemo(() => {
+    const map = {};
+    filteredClients.forEach(c => { const key = c.category_name || ''; (map[key] = map[key] || []).push(c); });
+    return Object.keys(map)
+      .sort((a, b) => (!a && !b) ? 0 : !a ? 1 : !b ? -1 : a.localeCompare(b))
+      .map(k => ({ name: k || null, clients: map[k] }));
+  }, [filteredClients]);
 
   const filteredSales = sales.filter(sale => {
     if (!sale) return false;
@@ -523,12 +521,6 @@ const Clients = () => {
 
         {activeTab === 'clients' ? (
           <>
-            <CustomSelect
-              value={categoryFilter}
-              onChange={(val) => setCategoryFilter(val)}
-              options={clientCategoryOptions}
-              className="w-52"
-            />
             <button
               onClick={() => setShowDebtOnly(!showDebtOnly)}
               className={`flex items-center gap-2 px-4 py-3 rounded-xl border transition-all ${
@@ -581,8 +573,21 @@ const Clients = () => {
             exit={{ opacity: 0 }}
           >
             {filteredClients.length > 0 ? (
-              <div className="grid grid-cols-2 gap-4">
-                {filteredClients.map((client, index) => (
+              <div>
+                {clientGroups.map(({ name: groupName, clients: groupClients }) => (
+                  <div key={groupName || '__none__'} className="mb-6">
+                    {clientGroups.length > 1 && (
+                      <div className="flex items-center gap-3 mb-4">
+                        <div className="flex items-center gap-2 px-3 py-1.5 rounded-full bg-cyan-500/10 border border-cyan-500/20">
+                          <Tag size={12} className="text-cyan-400" />
+                          <span className="text-cyan-300 text-sm font-medium">{groupName || 'غير مصنف'}</span>
+                          <span className="text-cyan-500/70 text-xs">({groupClients.length})</span>
+                        </div>
+                        <div className="flex-1 h-px bg-dark-700/30" />
+                      </div>
+                    )}
+                    <div className="grid grid-cols-2 gap-4">
+                      {groupClients.map((client, index) => (
                   <motion.div
                     key={client.id}
                     initial={{ opacity: 0, y: 20 }}
@@ -732,6 +737,9 @@ const Clients = () => {
                       </div>
                     </div>
                   </motion.div>
+                      ))}
+                    </div>
+                  </div>
                 ))}
               </div>
             ) : (
