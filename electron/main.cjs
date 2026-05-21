@@ -411,6 +411,7 @@ const remoteChannels = [
   'clients:getById',
   'clients:search',
   'clients:getWithDebt',
+  'clients:getInactive',
   'clients:add',
   'clients:update',
   'clients:recordContact',

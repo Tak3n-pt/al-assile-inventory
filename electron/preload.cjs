@@ -179,6 +179,7 @@ contextBridge.exposeInMainWorld('api', {
     getById: (id) => ipcRenderer.invoke('clients:getById', id),
     search: (query) => ipcRenderer.invoke('clients:search', query),
     getWithDebt: () => ipcRenderer.invoke('clients:getWithDebt'),
+    getInactive: (days) => ipcRenderer.invoke('clients:getInactive', days),
     add: (data) => ipcRenderer.invoke('clients:add', data),
     update: (id, data) => ipcRenderer.invoke('clients:update', id, data),
     recordContact: (id, note) => ipcRenderer.invoke('clients:recordContact', id, note),

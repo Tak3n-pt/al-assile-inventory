@@ -84,6 +84,7 @@ const Dashboard = () => {
   const [stats, setStats] = useState(null);
   const [lowStockItems, setLowStockItems] = useState([]);
   const [debtors, setDebtors] = useState([]);
+  const [inactiveClients, setInactiveClients] = useState([]);
   const [auditOpen, setAuditOpen] = useState(false);
   const [auditData, setAuditData] = useState(null);
   const [auditBusy, setAuditBusy] = useState(false);
@@ -105,10 +106,11 @@ const Dashboard = () => {
   const loadData = async () => {
     setLoading(true);
     try {
-      const [dashboardResult, lowStockResult, debtorsResult] = await Promise.all([
+      const [dashboardResult, lowStockResult, debtorsResult, inactiveResult] = await Promise.all([
         window.api.reports.getDashboardStats(),
         window.api.reports.getLowStockItems(),
-        window.api.clients.getWithDebt()
+        window.api.clients.getWithDebt(),
+        window.api.clients.getInactive(30)
       ]);
 
       if (dashboardResult.success) {
@@ -119,6 +121,9 @@ const Dashboard = () => {
       }
       if (debtorsResult.success) {
         setDebtors(debtorsResult.data || []);
+      }
+      if (inactiveResult?.success) {
+        setInactiveClients(inactiveResult.data || []);
       }
     } catch (error) {
       console.error('Error loading dashboard:', error);
@@ -278,6 +283,17 @@ const Dashboard = () => {
       >
         <h2 className="text-lg font-semibold text-white mb-4">{t('alertsNotifications')}</h2>
         <div className="space-y-3">
+          {inactiveClients.length > 0 && (
+            <AlertCard
+              title={`${inactiveClients.length} عميل لم يُستَعاد له`}
+              count={inactiveClients.length}
+              description="بدون مبيعات منذ أكثر من ٣٠ يوماً — قد يحتاج إلى تجديد"
+              icon={Users}
+              color="orange"
+              link="/clients"
+            />
+          )}
+
           {(stock?.low_stock_count > 0 || lowStockItems.length > 0) && (
             <div className="flex items-center gap-4 p-4 rounded-xl bg-amber-500/10 border border-amber-500/20">
               <div className="w-10 h-10 rounded-xl bg-amber-500/20 flex items-center justify-center">

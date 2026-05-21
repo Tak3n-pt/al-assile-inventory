@@ -613,6 +613,13 @@ const Clients = () => {
                               <span className="truncate">{client.category_name}</span>
                             </div>
                           )}
+                          {(client.days_since_last_sale != null ? client.days_since_last_sale : 9999) >= 30 && (
+                            <div className="mt-1 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold"
+                                 style={{ background: 'rgba(249,115,22,0.12)', border: '1px solid rgba(249,115,22,0.3)', color: '#fb923c' }}>
+                              <AlertTriangle size={10} />
+                              {client.days_since_last_sale != null ? `${client.days_since_last_sale} يوم` : 'لا مبيعات'}
+                            </div>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
